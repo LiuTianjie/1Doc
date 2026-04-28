@@ -146,8 +146,13 @@ export function MirrorSearch() {
               <kbd>Esc</kbd>
             </div>
 
-            <div className="spotlight-results">
-              {isLoading ? <div className="spotlight-empty">{t("search.loading")}</div> : null}
+            <div className={`spotlight-results${isLoading ? " is-loading" : ""}`} aria-busy={isLoading ? "true" : undefined}>
+              {isLoading ? (
+                <div className="spotlight-empty loading-inline">
+                  <span className="button-spinner" aria-hidden="true" />
+                  {t("search.loading")}
+                </div>
+              ) : null}
               {error ? <div className="spotlight-empty">{error}</div> : null}
               {!isLoading && !error && results.length === 0 ? (
                 <div className="spotlight-empty">{t("search.empty")}</div>

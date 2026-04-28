@@ -330,7 +330,7 @@ export default function SiteDetailPage() {
         </nav>
 
         {isLoading || !progress ? (
-          <div className="empty-state">{error || t("detail.loading")}</div>
+          error ? <div className="empty-state">{error}</div> : <DetailPageSkeleton />
         ) : (
           <>
             <header className="dashboard-header detail-hero">
@@ -381,7 +381,7 @@ export default function SiteDetailPage() {
                     onClick={() => copyLlmText(progress.mirrorUrls[0].lang)}
                     disabled={llmTextState === "working"}
                   >
-                    <span>LLM.txt</span>
+                    <span>{llmTextState === "working" ? <i className="button-spinner mini" aria-hidden="true" /> : null}LLM.txt</span>
                     <strong>
                       {llmTextState === "copied"
                         ? t("common.copied")
@@ -391,11 +391,13 @@ export default function SiteDetailPage() {
                     </strong>
                   </button>
                 ) : null}
-                <button className="ghost-button" type="button" onClick={refreshSite} disabled={refreshing}>
+                <button className="ghost-button loading-button" type="button" onClick={refreshSite} disabled={refreshing}>
+                  {refreshing ? <span className="button-spinner" aria-hidden="true" /> : null}
                   {refreshing ? t("detail.refreshing") : t("detail.incremental")}
                 </button>
                 {(counts?.failed ?? 0) > 0 ? (
-                  <button className="ghost-button" type="button" onClick={retryFailedPages} disabled={retryingFailed}>
+                  <button className="ghost-button loading-button" type="button" onClick={retryFailedPages} disabled={retryingFailed}>
+                    {retryingFailed ? <span className="button-spinner" aria-hidden="true" /> : null}
                     {retryingFailed ? t("detail.retrying") : t("detail.retryFailed")}
                   </button>
                 ) : null}
@@ -498,11 +500,12 @@ export default function SiteDetailPage() {
                             ) : null}
                             {page.status === "failed" ? (
                               <button
-                                className="ghost-button compact-button"
+                                className="ghost-button compact-button loading-button"
                                 type="button"
                                 onClick={() => retrySinglePage(page.id)}
                                 disabled={retryingPageId === page.id}
                               >
+                                {retryingPageId === page.id ? <span className="button-spinner" aria-hidden="true" /> : null}
                                 {retryingPageId === page.id ? t("detail.retrying") : t("detail.retry")}
                               </button>
                             ) : null}
@@ -552,6 +555,48 @@ function DetailLanguageVisitPill({ progress }: { progress: SiteProgress }) {
           {mirror.lang.toUpperCase()}
         </a>
       ))}
+    </div>
+  );
+}
+
+function DetailPageSkeleton() {
+  return (
+    <div className="detail-skeleton" aria-busy="true" aria-live="polite">
+      <div className="dashboard-header detail-hero">
+        <div>
+          <span className="skeleton-block skeleton-kicker" />
+          <span className="skeleton-block skeleton-hero-title" />
+          <span className="skeleton-block skeleton-line short" />
+        </div>
+        <span className="skeleton-block skeleton-pill wide" />
+      </div>
+      <section className="projects-panel detail-overview skeleton-card">
+        <span className="skeleton-block skeleton-line" />
+        <div className="card-metrics">
+          <span className="skeleton-block skeleton-metric" />
+          <span className="skeleton-block skeleton-metric" />
+          <span className="skeleton-block skeleton-metric" />
+          <span className="skeleton-block skeleton-metric" />
+        </div>
+        <div className="project-actions">
+          <span className="skeleton-block skeleton-pill" />
+          <span className="skeleton-block skeleton-pill wide" />
+          <span className="skeleton-block skeleton-pill wide" />
+        </div>
+      </section>
+      <div className="detail-layout detail-page-layout">
+        <div className="page-progress-card skeleton-card">
+          <span className="skeleton-block skeleton-title" />
+          <span className="skeleton-block skeleton-page-row" />
+          <span className="skeleton-block skeleton-page-row" />
+          <span className="skeleton-block skeleton-page-row" />
+        </div>
+        <aside className="event-panel skeleton-card">
+          <span className="skeleton-block skeleton-title" />
+          <span className="skeleton-block skeleton-line" />
+          <span className="skeleton-block skeleton-line short" />
+        </aside>
+      </div>
     </div>
   );
 }

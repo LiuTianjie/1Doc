@@ -71,6 +71,8 @@ export default function PlazaPage() {
   const [sites, setSites] = useState<SiteCard[]>([]);
   const [voterId, setVoterId] = useState<string>("");
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [votingSiteIds, setVotingSiteIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
 
   function ensureVoterId(): string {
@@ -84,7 +86,11 @@ export default function PlazaPage() {
     return next;
   }
 
-  async function loadSites(activeVoterId = voterId) {
+  async function loadSites(activeVoterId = voterId, options: { silent?: boolean } = {}) {
+    if (!options.silent && !isLoading) {
+      setIsRefreshing(true);
+    }
+
     try {
       const query = activeVoterId ? `?voterId=${encodeURIComponent(activeVoterId)}` : "";
       const response = await fetch(`/api/sites${query}`, { cache: "no-store" });
@@ -98,6 +104,7 @@ export default function PlazaPage() {
       setError(loadError instanceof Error ? loadError.message : t("common.loadFailed"));
     } finally {
       setIsLoading(false);
+      setIsRefreshing(false);
     }
   }
 
@@ -105,7 +112,7 @@ export default function PlazaPage() {
     const id = ensureVoterId();
     setVoterId(id);
     loadSites(id);
-    const timer = window.setInterval(() => loadSites(id), 8000);
+    const timer = window.setInterval(() => loadSites(id, { silent: true }), 8000);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -114,6 +121,7 @@ export default function PlazaPage() {
     setVoterId(id);
     const nextValue = site.user_vote === value ? 0 : value;
     const previous = site;
+    setVotingSiteIds((current) => new Set(current).add(site.id));
 
     setSites((current) =>
       current.map((candidate) =>
@@ -166,6 +174,12 @@ export default function PlazaPage() {
     } catch (voteError) {
       setSites((current) => current.map((candidate) => (candidate.id === site.id ? previous : candidate)));
       setError(voteError instanceof Error ? voteError.message : t("common.loadFailed"));
+    } finally {
+      setVotingSiteIds((current) => {
+        const next = new Set(current);
+        next.delete(site.id);
+        return next;
+      });
     }
   }
 
@@ -283,7 +297,13 @@ export default function PlazaPage() {
                   <span>{progressFor(site)}%</span>
                 </div>
                 <div className="mirror-actions">
-                  <VoteControls site={site} onVote={vote} upvoteLabel={t("common.upvote")} downvoteLabel={t("common.downvote")} />
+                  <VoteControls
+                    site={site}
+                    onVote={vote}
+                    busy={votingSiteIds.has(site.id)}
+                    upvoteLabel={t("common.upvote")}
+                    downvoteLabel={t("common.downvote")}
+                  />
                   <a className="primary-link mirror-visit-link" href={`/sites/${site.slug}`}>
                     {t("common.progress")}
                   </a>
@@ -300,13 +320,18 @@ export default function PlazaPage() {
             <p className="eyebrow">{t("plaza.readyEyebrow")}</p>
             <h2 id="ready-title">{t("plaza.readyTitle")}</h2>
           </div>
-          <button className="ghost-button" type="button" onClick={() => loadSites()}>
-            {t("common.refresh")}
+          <button className="ghost-button loading-button" type="button" onClick={() => loadSites()} disabled={isRefreshing}>
+            {isRefreshing ? <span className="button-spinner" aria-hidden="true" /> : null}
+            {isRefreshing ? t("detail.refreshing") : t("common.refresh")}
           </button>
         </div>
 
         {isLoading ? (
-          <div className="empty-state">{t("plaza.loading")}</div>
+          <div className="mirror-grid" aria-busy="true">
+            <MirrorCardSkeleton />
+            <MirrorCardSkeleton />
+            <MirrorCardSkeleton />
+          </div>
         ) : readySites.length === 0 ? (
           <div className="empty-state">{t("plaza.empty")}</div>
         ) : (
@@ -352,7 +377,13 @@ export default function PlazaPage() {
                   <span>{site.target_langs.join(", ")}</span>
                 </div>
                 <div className="mirror-actions">
-                  <VoteControls site={site} onVote={vote} upvoteLabel={t("common.upvote")} downvoteLabel={t("common.downvote")} />
+                  <VoteControls
+                    site={site}
+                    onVote={vote}
+                    busy={votingSiteIds.has(site.id)}
+                    upvoteLabel={t("common.upvote")}
+                    downvoteLabel={t("common.downvote")}
+                  />
                   <LanguageVisitPill site={site} />
                   <a className="ghost-button" href={`/sites/${site.slug}`}>
                     {t("common.details")}
@@ -375,22 +406,25 @@ export default function PlazaPage() {
 function VoteControls({
   site,
   onVote,
+  busy,
   upvoteLabel,
   downvoteLabel
 }: {
   site: SiteCard;
   onVote: (site: SiteCard, value: -1 | 1) => void;
+  busy?: boolean;
   upvoteLabel: string;
   downvoteLabel: string;
 }) {
   const { t } = useI18n();
 
   return (
-    <div className="vote-controls" aria-label={t("common.votes")}>
+    <div className={`vote-controls${busy ? " is-busy" : ""}`} aria-label={t("common.votes")} aria-busy={busy ? "true" : undefined}>
       <button
         className={site.user_vote === 1 ? "active" : ""}
         type="button"
         onClick={() => onVote(site, 1)}
+        disabled={busy}
         aria-pressed={site.user_vote === 1}
         title={upvoteLabel}
       >
@@ -402,6 +436,7 @@ function VoteControls({
         className={site.user_vote === -1 ? "active" : ""}
         type="button"
         onClick={() => onVote(site, -1)}
+        disabled={busy}
         aria-pressed={site.user_vote === -1}
         title={downvoteLabel}
       >
@@ -507,11 +542,38 @@ function LlmTextButton({
 
   return (
     <button className={`llm-copy-button${compact ? " compact" : ""}`} type="button" onClick={copyLlmText} disabled={state === "working"}>
-      <span>LLM.txt</span>
+      <span>{state === "working" ? <i className="button-spinner mini" aria-hidden="true" /> : null}LLM.txt</span>
       {compact ? null : (
         <strong>{state === "copied" ? t("common.copied") : hasLlmText ? t("common.copyLlm") : t("common.generateLlm")}</strong>
       )}
     </button>
+  );
+}
+
+function MirrorCardSkeleton() {
+  return (
+    <article className="mirror-card skeleton-card" aria-hidden="true">
+      <div className="mirror-card-top">
+        <div className="mirror-title-row">
+          <span className="skeleton-block skeleton-icon" />
+          <div>
+            <span className="skeleton-block skeleton-kicker" />
+            <span className="skeleton-block skeleton-title" />
+          </div>
+        </div>
+        <span className="skeleton-block skeleton-pill" />
+      </div>
+      <span className="skeleton-block skeleton-line" />
+      <div className="mirror-meta">
+        <span className="skeleton-block skeleton-chip" />
+        <span className="skeleton-block skeleton-chip" />
+        <span className="skeleton-block skeleton-chip" />
+      </div>
+      <div className="mirror-actions">
+        <span className="skeleton-block skeleton-pill" />
+        <span className="skeleton-block skeleton-pill wide" />
+      </div>
+    </article>
   );
 }
 

@@ -431,7 +431,7 @@ export default function SubmitPage() {
               </div>
             </div>
 
-            <form className="mirror-form" onSubmit={createMirror}>
+            <form className={`mirror-form${isSubmitting ? " is-submitting" : ""}`} onSubmit={createMirror} aria-busy={isSubmitting ? "true" : undefined}>
               <label htmlFor="url">{t("submit.url")}</label>
               <input
                 id="url"
@@ -442,6 +442,7 @@ export default function SubmitPage() {
                 required
                 value={entryUrl}
                 onChange={(event) => setEntryUrl(event.target.value)}
+                disabled={isSubmitting}
               />
 
               <label htmlFor="pageLimit">{t("submit.limit")}</label>
@@ -453,6 +454,7 @@ export default function SubmitPage() {
                 type="number"
                 value={pageLimit}
                 onChange={(event) => setPageLimit(Number(event.target.value))}
+                disabled={isSubmitting}
               />
 
               <fieldset className="language-fieldset">
@@ -465,6 +467,7 @@ export default function SubmitPage() {
                       type="button"
                       aria-pressed={targetLangs.includes(language.value)}
                       onClick={() => toggleLang(language.value)}
+                      disabled={isSubmitting}
                     >
                       <span>{language.label}</span>
                       <i aria-hidden="true">✓</i>
@@ -473,7 +476,8 @@ export default function SubmitPage() {
                 </div>
               </fieldset>
 
-              <button className="primary-button" type="submit" disabled={isSubmitting}>
+              <button className="primary-button loading-button" type="submit" disabled={isSubmitting}>
+                {isSubmitting ? <span className="button-spinner dark" aria-hidden="true" /> : null}
                 {isSubmitting ? t("submit.checking") : t("submit.button")}
               </button>
             </form>
@@ -642,11 +646,13 @@ function ProjectCard({
           {t("submit.progressDialog")}
         </button>
         {site.failed_count > 0 ? (
-          <button className="ghost-button" type="button" onClick={() => onRetryFailed(site.slug)} disabled={retrying}>
+          <button className="ghost-button loading-button" type="button" onClick={() => onRetryFailed(site.slug)} disabled={retrying}>
+            {retrying ? <span className="button-spinner" aria-hidden="true" /> : null}
             {retrying ? t("detail.retrying") : t("detail.retryFailed")}
           </button>
         ) : null}
-        <button className="ghost-button" type="button" onClick={() => onRefresh(site.slug)} disabled={refreshing}>
+        <button className="ghost-button loading-button" type="button" onClick={() => onRefresh(site.slug)} disabled={refreshing}>
+          {refreshing ? <span className="button-spinner" aria-hidden="true" /> : null}
           {refreshing ? t("detail.refreshing") : t("detail.incremental")}
         </button>
         <span className="updated-time">{t("submit.updatedAt", { time: formatTime(site.updated_at, locale) })}</span>
@@ -683,7 +689,10 @@ function ProjectDetailPanel({
               ×
             </button>
           </div>
-          <div className="empty-state compact-empty">{loading ? t("submit.loadingProgress") : t("submit.selectProgress")}</div>
+          <div className="empty-state compact-empty loading-inline">
+            {loading ? <span className="button-spinner" aria-hidden="true" /> : null}
+            {loading ? t("submit.loadingProgress") : t("submit.selectProgress")}
+          </div>
         </section>
       </div>
     );
@@ -810,11 +819,12 @@ function ProjectDetailPanel({
                       <div className="page-action-cell">
                         {page.status === "failed" ? (
                           <button
-                            className="ghost-button compact-button"
+                            className="ghost-button compact-button loading-button"
                             type="button"
                             onClick={() => onRetryPage(page.id)}
                             disabled={retryingPageId === page.id}
                           >
+                            {retryingPageId === page.id ? <span className="button-spinner" aria-hidden="true" /> : null}
                             {retryingPageId === page.id ? t("detail.retrying") : t("detail.retry")}
                           </button>
                         ) : null}
