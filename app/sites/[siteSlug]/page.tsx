@@ -382,7 +382,7 @@ export default function SiteDetailPage() {
               </div>
               <div className="project-actions">
                 <DetailLanguageVisitPill progress={progress} />
-                {progress.mirrorUrls[0] ? (
+                {progress.site.status === "ready" && progress.mirrorUrls[0] ? (
                   <div className="llm-copy-wrap">
                     <button
                       className="llm-copy-button"
@@ -615,14 +615,15 @@ function DetailPageSkeleton() {
 }
 
 function SiteFavicon({ progress }: { progress: SiteProgress }) {
+  const [failed, setFailed] = useState(false);
   const fallback = progress.site.slug.slice(0, 1).toUpperCase();
-  if (!progress.site.faviconUrl) {
+  if (!progress.site.faviconUrl || failed) {
     return <span className="favicon-tile favicon-large">{fallback}</span>;
   }
 
   return (
     <span className="favicon-tile favicon-large" aria-hidden="true">
-      <img src={progress.site.faviconUrl} alt="" onError={(event) => event.currentTarget.remove()} />
+      <img src={progress.site.faviconUrl} alt="" onError={() => setFailed(true)} />
     </span>
   );
 }

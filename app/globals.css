@@ -925,11 +925,31 @@ kbd {
 }
 
 .mirror-card {
+  position: relative;
   display: grid;
   gap: 16px;
   min-width: 0;
   border-radius: 15px;
   padding: 18px;
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
+}
+
+.mirror-card-clickable {
+  cursor: pointer;
+}
+
+.mirror-card-clickable:hover,
+.mirror-card-clickable:focus-within {
+  border-color: rgba(0, 153, 255, 0.38);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow:
+    rgba(0, 153, 255, 0.14) 0 0 0 1px,
+    rgba(0, 0, 0, 0.2) 0 16px 34px;
+  transform: translateY(-2px);
 }
 
 .mirror-card-top,
@@ -1506,6 +1526,7 @@ kbd {
 .skeleton-block {
   position: relative;
   display: block;
+  max-width: 100%;
   overflow: hidden;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.09);
@@ -1551,7 +1572,7 @@ kbd {
 }
 
 .skeleton-line.short {
-  width: min(420px, 56vw);
+  width: min(420px, 72%);
 }
 
 .skeleton-pill {

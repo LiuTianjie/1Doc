@@ -66,6 +66,10 @@ function progressFor(site: SiteCard): number {
   return Math.min(100, Math.round((site.generated_count / expected) * 100));
 }
 
+function isInteractiveCardTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest("a,button,select,input,label"));
+}
+
 export default function PlazaPage() {
   const { locale, t } = useI18n();
   const [sites, setSites] = useState<SiteCard[]>([]);
@@ -255,7 +259,15 @@ export default function PlazaPage() {
           </div>
           <div className="mirror-grid">
             {activeSites.slice(0, 3).map((site) => (
-              <article className="mirror-card" key={site.id}>
+              <article
+                className="mirror-card mirror-card-clickable"
+                key={site.id}
+                onClick={(event) => {
+                  if (!isInteractiveCardTarget(event.target)) {
+                    window.location.href = `/sites/${site.slug}`;
+                  }
+                }}
+              >
                 <div className="mirror-card-top">
                   <div className="mirror-title-row">
                     <SiteFavicon site={site} />
@@ -337,7 +349,15 @@ export default function PlazaPage() {
         ) : (
           <div className="mirror-grid">
             {readySites.map((site) => (
-              <article className="mirror-card" key={site.id}>
+              <article
+                className="mirror-card mirror-card-clickable"
+                key={site.id}
+                onClick={(event) => {
+                  if (!isInteractiveCardTarget(event.target)) {
+                    window.location.href = `/sites/${site.slug}`;
+                  }
+                }}
+              >
                 <div className="mirror-card-top">
                   <div className="mirror-title-row">
                     <SiteFavicon site={site} />
@@ -385,9 +405,6 @@ export default function PlazaPage() {
                     downvoteLabel={t("common.downvote")}
                   />
                   <LanguageVisitPill site={site} />
-                  <a className="ghost-button" href={`/sites/${site.slug}`}>
-                    {t("common.details")}
-                  </a>
                   <a className="ghost-button" href={site.entry_url} target="_blank" rel="noreferrer">
                     {t("common.original")}
                   </a>
@@ -583,13 +600,16 @@ function MirrorCardSkeleton() {
 }
 
 function SiteFavicon({ site }: { site: SiteCard }) {
-  if (!site.faviconUrl) {
-    return <span className="favicon-tile">{hostname(site.entry_url).slice(0, 1).toUpperCase()}</span>;
+  const [failed, setFailed] = useState(false);
+  const fallback = hostname(site.entry_url).slice(0, 1).toUpperCase();
+
+  if (!site.faviconUrl || failed) {
+    return <span className="favicon-tile">{fallback}</span>;
   }
 
   return (
     <span className="favicon-tile" aria-hidden="true">
-      <img src={site.faviconUrl} alt="" onError={(event) => event.currentTarget.remove()} />
+      <img src={site.faviconUrl} alt="" onError={() => setFailed(true)} />
     </span>
   );
 }

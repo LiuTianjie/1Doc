@@ -180,13 +180,16 @@ export function MirrorSearch() {
 }
 
 function SiteFavicon({ site }: { site: SiteCard }) {
-  if (!site.faviconUrl) {
-    return <span className="favicon-tile">{hostname(site.entry_url).slice(0, 1).toUpperCase()}</span>;
+  const [failed, setFailed] = useState(false);
+  const fallback = hostname(site.entry_url).slice(0, 1).toUpperCase();
+
+  if (!site.faviconUrl || failed) {
+    return <span className="favicon-tile">{fallback}</span>;
   }
 
   return (
     <span className="favicon-tile" aria-hidden="true">
-      <img src={site.faviconUrl} alt="" onError={(event) => event.currentTarget.remove()} />
+      <img src={site.faviconUrl} alt="" onError={() => setFailed(true)} />
     </span>
   );
 }

@@ -1,18 +1,10 @@
 import { inngest } from "@/inngest/client";
+import { localFaviconUrl } from "@/lib/favicon";
 import { recoverStaleMirrorGeneration } from "@/lib/mirror/jobs";
 import { getSiteProgress } from "@/lib/mirror/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-function faviconUrl(entryUrl: string): string | null {
-  try {
-    const url = new URL(entryUrl);
-    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(url.hostname)}&sz=64`;
-  } catch {
-    return null;
-  }
-}
 
 export async function GET(
   _request: Request,
@@ -38,7 +30,7 @@ export async function GET(
     ...progress,
     site: {
       ...progress.site,
-      faviconUrl: faviconUrl(progress.site.entry_url)
+      faviconUrl: localFaviconUrl(progress.site.entry_url)
     },
     mirrorUrls: progress.site.target_langs
       .map((lang) => {

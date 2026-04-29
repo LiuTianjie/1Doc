@@ -9,18 +9,10 @@ import {
 } from "@/lib/mirror/store";
 import { enqueueMirrorGeneration } from "@/lib/mirror/jobs";
 import { inngest } from "@/inngest/client";
+import { localFaviconUrl } from "@/lib/favicon";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-function faviconUrl(entryUrl: string): string | null {
-  try {
-    const url = new URL(entryUrl);
-    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(url.hostname)}&sz=64`;
-  } catch {
-    return null;
-  }
-}
 
 function voterKeyFromRequest(request: Request): string | undefined {
   const { searchParams } = new URL(request.url);
@@ -43,7 +35,7 @@ export async function GET(request: Request) {
       return {
         ...site,
         ...(voteStats.get(site.id) ?? { upvote_count: 0, downvote_count: 0, vote_score: 0, user_vote: 0 }),
-        faviconUrl: faviconUrl(site.entry_url),
+        faviconUrl: localFaviconUrl(site.entry_url),
         latestEvent: latestEvents.get(site.id) ?? null,
         llmTexts: llmTexts.map(({ lang, page_count, generated_at, updated_at }) => ({
           lang,
