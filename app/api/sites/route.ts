@@ -59,7 +59,9 @@ export async function GET(request: Request) {
           .filter((url): url is { lang: string; url: string } => Boolean(url))
       };
     });
-  siteCards.sort(
+  const displayableSiteCards = siteCards.filter((site) => site.status !== "ready" || site.mirrorUrls.length > 0);
+
+  displayableSiteCards.sort(
     (a, b) =>
       b.vote_score - a.vote_score ||
       b.upvote_count - a.upvote_count ||
@@ -68,7 +70,7 @@ export async function GET(request: Request) {
   );
 
   return Response.json({
-    sites: siteCards
+    sites: displayableSiteCards
   });
 }
 

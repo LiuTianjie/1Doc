@@ -106,6 +106,7 @@ class SupabaseRequestError extends Error {
 
 const LOCK_TTL_MS = 6 * 60 * 60 * 1000;
 const LLM_TEXT_LOCK_TTL_MS = 15 * 60 * 1000;
+const SUPABASE_PAGE_SIZE = 1000;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -152,6 +153,27 @@ async function supabaseRequest<T>(
   }
 
   return JSON.parse(body) as T;
+}
+
+async function supabaseRequestAll<T>(table: MirrorTable, query: string): Promise<T[]> {
+  const rows: T[] = [];
+  let offset = 0;
+
+  while (true) {
+    const separator = query.includes("?") ? "&" : "?";
+    const page = await supabaseRequest<T[]>(table, {
+      method: "GET",
+      query: `${query}${separator}limit=${SUPABASE_PAGE_SIZE}&offset=${offset}`
+    });
+    const pageRows = page ?? [];
+    rows.push(...pageRows);
+
+    if (pageRows.length < SUPABASE_PAGE_SIZE) {
+      return rows;
+    }
+
+    offset += SUPABASE_PAGE_SIZE;
+  }
 }
 
 function siteMemoryKey(slug: string): string {
@@ -1090,11 +1112,10 @@ export async function findMirrorTargetByPath(path: string): Promise<{
 
 export async function listMirroredPages(siteId: string): Promise<MirroredPageSummary[]> {
   if (usesSupabase()) {
-    const rows = await supabaseRequest<MirroredPageSummary[]>("mirrored_pages", {
-      method: "GET",
-      query: `?select=id,site_id,source_page_id,lang,path,source_html_hash,generated_at,updated_at&site_id=eq.${encodeURIComponent(siteId)}&order=lang.asc,path.asc`
-    });
-    return rows ?? [];
+    return supabaseRequestAll<MirroredPageSummary>(
+      "mirrored_pages",
+      `?select=id,site_id,source_page_id,lang,path,source_html_hash,generated_at,updated_at&site_id=eq.${encodeURIComponent(siteId)}&order=lang.asc,path.asc`
+    );
   }
 
   return [...memory.mirrored.values()]
@@ -1105,11 +1126,10 @@ export async function listMirroredPages(siteId: string): Promise<MirroredPageSum
 
 export async function listMirroredPagesWithHtml(siteId: string, lang: string): Promise<MirroredPage[]> {
   if (usesSupabase()) {
-    const rows = await supabaseRequest<MirroredPage[]>("mirrored_pages", {
-      method: "GET",
-      query: `?site_id=eq.${encodeURIComponent(siteId)}&lang=eq.${encodeURIComponent(lang)}&order=path.asc`
-    });
-    return rows ?? [];
+    return supabaseRequestAll<MirroredPage>(
+      "mirrored_pages",
+      `?site_id=eq.${encodeURIComponent(siteId)}&lang=eq.${encodeURIComponent(lang)}&order=path.asc`
+    );
   }
 
   return [...memory.mirrored.values()]
@@ -1137,13 +1157,12 @@ export async function listMirroredPagesForSites(siteIds: string[]): Promise<Map<
       result.get(page.site_id)?.push(summary);
     }
   } else {
-    const rows =
-      (await supabaseRequest<MirroredPageSummary[]>("mirrored_pages", {
-        method: "GET",
-        query: `?select=id,site_id,source_page_id,lang,path,source_html_hash,generated_at,updated_at&site_id=in.(${siteIds
-          .map(encodeURIComponent)
-          .join(",")})&order=site_id.asc,lang.asc,path.asc`
-      })) ?? [];
+    const rows = await supabaseRequestAll<MirroredPageSummary>(
+      "mirrored_pages",
+      `?select=id,site_id,source_page_id,lang,path,source_html_hash,generated_at,updated_at&site_id=in.(${siteIds
+        .map(encodeURIComponent)
+        .join(",")})&order=site_id.asc,lang.asc,path.asc`
+    );
 
     for (const row of rows) {
       result.get(row.site_id)?.push(row);
