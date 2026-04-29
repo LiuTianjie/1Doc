@@ -243,18 +243,26 @@ export default function SiteDetailPage() {
     setLlmTextState("working");
     setError(null);
     try {
-      const response = hasLlmText
+      let response = hasLlmText
         ? await fetch(`/api/sites/${progress.site.slug}/llm-text?lang=${encodeURIComponent(lang)}`, { cache: "no-store" })
         : await fetch(`/api/sites/${progress.site.slug}/llm-text`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ lang })
           });
-      const payload = (await response.json()) as {
+      let payload = (await response.json()) as {
         content?: string;
         llmText?: { content: string; lang: string; page_count: number; generated_at: string; updated_at: string };
         error?: string;
       };
+      if (!response.ok && response.status === 404 && hasLlmText) {
+        response = await fetch(`/api/sites/${progress.site.slug}/llm-text`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ lang })
+        });
+        payload = (await response.json()) as typeof payload;
+      }
       if (!response.ok) {
         throw new Error(payload.error || t("common.copyFailed"));
       }
@@ -375,21 +383,26 @@ export default function SiteDetailPage() {
               <div className="project-actions">
                 <DetailLanguageVisitPill progress={progress} />
                 {progress.mirrorUrls[0] ? (
-                  <button
-                    className="llm-copy-button"
-                    type="button"
-                    onClick={() => copyLlmText(progress.mirrorUrls[0].lang)}
-                    disabled={llmTextState === "working"}
-                  >
-                    <span>{llmTextState === "working" ? <i className="button-spinner mini" aria-hidden="true" /> : null}LLM.txt</span>
-                    <strong>
-                      {llmTextState === "copied"
-                        ? t("common.copied")
-                        : progress.llmTexts.some((item) => item.lang === progress.mirrorUrls[0]?.lang)
-                          ? t("common.copyLlm")
-                          : t("common.generateLlm")}
-                    </strong>
-                  </button>
+                  <div className="llm-copy-wrap">
+                    <button
+                      className="llm-copy-button"
+                      type="button"
+                      onClick={() => copyLlmText(progress.mirrorUrls[0].lang)}
+                      disabled={llmTextState === "working"}
+                    >
+                      <span>{llmTextState === "working" ? <i className="button-spinner mini" aria-hidden="true" /> : null}LLM.txt</span>
+                      <strong>
+                        {llmTextState === "copied"
+                          ? t("common.copied")
+                          : progress.llmTexts.some((item) => item.lang === progress.mirrorUrls[0]?.lang)
+                            ? t("common.copyLlm")
+                            : t("common.generateLlm")}
+                      </strong>
+                    </button>
+                    <span className="llm-copy-feedback" role="status" aria-live="polite">
+                      {llmTextState === "copied" ? t("common.copiedToClipboard") : ""}
+                    </span>
+                  </div>
                 ) : null}
                 <button className="ghost-button loading-button" type="button" onClick={refreshSite} disabled={refreshing}>
                   {refreshing ? <span className="button-spinner" aria-hidden="true" /> : null}

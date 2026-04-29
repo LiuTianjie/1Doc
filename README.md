@@ -84,6 +84,10 @@ INNGEST_DEV=
 
 SITE_BASE_URL=http://localhost:3000
 MIRROR_PAGE_CONCURRENCY=8
+MIRROR_LANG_CONCURRENCY=2
+TRANSLATE_BATCH_CONCURRENCY=2
+TRANSLATE_BATCH_ITEMS=12
+TRANSLATE_BATCH_CHARS=3000
 BROWSERLESS_WS_URL=
 TRANSLATE_API_TOKEN=
 ```
@@ -92,6 +96,8 @@ Notes:
 
 - `ARK_MODEL` can be a model name or an Ark endpoint ID such as `ep-...`.
 - `MIRROR_PAGE_CONCURRENCY` defaults to `8` and is capped at `16`.
+- `MIRROR_LANG_CONCURRENCY` controls per-page target-language parallelism and defaults to `2`.
+- `TRANSLATE_BATCH_CONCURRENCY` controls parallel model batches and defaults to `2`.
 - `BROWSERLESS_WS_URL` is optional. When configured, 1Doc can fall back to rendered HTML for SPA-like pages.
 - `SUPABASE_SERVICE_ROLE_KEY` must only be used on the server. Do not expose it to browser code.
 

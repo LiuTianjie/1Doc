@@ -29,6 +29,7 @@ type MirrorTable =
   | "generation_jobs"
   | "generation_locks"
   | "job_events"
+  | "site_llm_text_locks"
   | "site_llm_texts"
   | "site_votes";
 
@@ -38,6 +39,7 @@ type MirrorMemory = {
   mirrored: Map<string, MirroredPage>;
   jobs?: Map<string, GenerationJob>;
   locks?: Map<string, GenerationLock>;
+  llmTextLocks?: Map<string, SiteLlmTextLock>;
   votes?: Map<string, SiteVote>;
   llmTexts?: Map<string, SiteLlmText>;
   events: Map<string, JobEvent>;
@@ -49,6 +51,16 @@ type GenerationLock = {
   created_at: string;
   expires_at: string;
 };
+
+type SiteLlmTextLock = {
+  lock_key: string;
+  site_id: string;
+  lang: string;
+  created_at: string;
+  expires_at: string;
+};
+
+type SourcePageInput = Omit<SourcePage, "id" | "discovered_at" | "updated_at">;
 
 const globalForMirror = globalThis as typeof globalThis & {
   __docNativeMirrorMemory?: MirrorMemory;
@@ -62,6 +74,7 @@ const memoryBase =
     mirrored: new Map<string, MirroredPage>(),
     jobs: new Map<string, GenerationJob>(),
     locks: new Map<string, GenerationLock>(),
+    llmTextLocks: new Map<string, SiteLlmTextLock>(),
     votes: new Map<string, SiteVote>(),
     llmTexts: new Map<string, SiteLlmText>(),
     events: new Map<string, JobEvent>()
@@ -69,12 +82,14 @@ const memoryBase =
 
 memoryBase.jobs ??= new Map<string, GenerationJob>();
 memoryBase.locks ??= new Map<string, GenerationLock>();
+memoryBase.llmTextLocks ??= new Map<string, SiteLlmTextLock>();
 memoryBase.votes ??= new Map<string, SiteVote>();
 memoryBase.llmTexts ??= new Map<string, SiteLlmText>();
 
 const memory = memoryBase as MirrorMemory & {
   jobs: Map<string, GenerationJob>;
   locks: Map<string, GenerationLock>;
+  llmTextLocks: Map<string, SiteLlmTextLock>;
   votes: Map<string, SiteVote>;
   llmTexts: Map<string, SiteLlmText>;
 };
@@ -90,6 +105,7 @@ class SupabaseRequestError extends Error {
 }
 
 const LOCK_TTL_MS = 6 * 60 * 60 * 1000;
+const LLM_TEXT_LOCK_TTL_MS = 15 * 60 * 1000;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -158,12 +174,20 @@ function siteLlmTextMemoryKey(siteId: string, lang: string): string {
   return `${siteId}:${lang}`;
 }
 
+function siteLlmTextLockKey(siteId: string, lang: string): string {
+  return `${siteId}:${lang}`;
+}
+
 function isGenerationJobActive(job: GenerationJob): boolean {
   return job.status === "queued" || job.status === "running";
 }
 
 function lockExpiresAt(): string {
   return new Date(Date.now() + LOCK_TTL_MS).toISOString();
+}
+
+function llmTextLockExpiresAt(): string {
+  return new Date(Date.now() + LLM_TEXT_LOCK_TTL_MS).toISOString();
 }
 
 function isExpired(value: string): boolean {
@@ -206,6 +230,14 @@ function sourcePageForSupabase(page: SourcePage): SourcePage {
 
 function sameStringArray(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function chunks<T>(values: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    result.push(values.slice(index, index + size));
+  }
+  return result;
 }
 
 function isSiteActive(site: DocSite): boolean {
@@ -611,6 +643,89 @@ export async function releaseGenerationJob(siteId: string, jobId: string): Promi
   }
 }
 
+async function getSiteLlmTextLock(siteId: string, lang: string): Promise<SiteLlmTextLock | null> {
+  const lockKey = siteLlmTextLockKey(siteId, lang);
+  const inMemory = memory.llmTextLocks.get(lockKey);
+  if (inMemory) {
+    return inMemory;
+  }
+
+  const rows = await supabaseRequest<SiteLlmTextLock[]>("site_llm_text_locks", {
+    method: "GET",
+    query: `?lock_key=eq.${encodeURIComponent(lockKey)}&limit=1`
+  });
+  return rows?.[0] ?? null;
+}
+
+async function deleteSiteLlmTextLock(siteId: string, lang: string): Promise<void> {
+  const lockKey = siteLlmTextLockKey(siteId, lang);
+  memory.llmTextLocks.delete(lockKey);
+
+  await supabaseRequest("site_llm_text_locks", {
+    method: "DELETE",
+    query: `?lock_key=eq.${encodeURIComponent(lockKey)}`
+  });
+}
+
+export async function tryClaimSiteLlmTextLock(siteId: string, lang: string): Promise<boolean> {
+  const lockKey = siteLlmTextLockKey(siteId, lang);
+  const now = nowIso();
+  const lock: SiteLlmTextLock = {
+    lock_key: lockKey,
+    site_id: siteId,
+    lang,
+    created_at: now,
+    expires_at: llmTextLockExpiresAt()
+  };
+
+  if (!usesSupabase()) {
+    const existing = memory.llmTextLocks.get(lockKey);
+    if (existing && !isExpired(existing.expires_at)) {
+      return false;
+    }
+    memory.llmTextLocks.set(lockKey, lock);
+    return true;
+  }
+
+  try {
+    await supabaseRequest<SiteLlmTextLock[]>("site_llm_text_locks", {
+      method: "POST",
+      headers: {
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify(lock)
+    });
+    memory.llmTextLocks.set(lockKey, lock);
+    return true;
+  } catch (error) {
+    if (!(error instanceof SupabaseRequestError) || error.status !== 409) {
+      console.warn("LLM.txt lock table is unavailable; falling back to in-memory lock.", error);
+      const existing = memory.llmTextLocks.get(lockKey);
+      if (existing && !isExpired(existing.expires_at)) {
+        return false;
+      }
+      memory.llmTextLocks.set(lockKey, lock);
+      return true;
+    }
+
+    const existing = await getSiteLlmTextLock(siteId, lang);
+    if (existing && isExpired(existing.expires_at)) {
+      await deleteSiteLlmTextLock(siteId, lang);
+      return tryClaimSiteLlmTextLock(siteId, lang);
+    }
+
+    return false;
+  }
+}
+
+export async function releaseSiteLlmTextLock(siteId: string, lang: string): Promise<void> {
+  try {
+    await deleteSiteLlmTextLock(siteId, lang);
+  } catch (error) {
+    console.warn("Could not release LLM.txt generation lock.", error);
+  }
+}
+
 export async function updateGenerationJob(jobId: string, patch: Partial<GenerationJob>): Promise<void> {
   const now = nowIso();
   const current = memory.jobs.get(jobId);
@@ -644,7 +759,7 @@ export async function updateGenerationJob(jobId: string, patch: Partial<Generati
   }
 }
 
-export async function upsertSourcePage(input: Omit<SourcePage, "id" | "discovered_at" | "updated_at">): Promise<SourcePage> {
+export async function upsertSourcePage(input: SourcePageInput): Promise<SourcePage> {
   let existing = [...memory.pages.values()].find(
     (page) => page.site_id === input.site_id && page.path === input.path
   );
@@ -702,6 +817,95 @@ export async function upsertSourcePage(input: Omit<SourcePage, "id" | "discovere
   }
 
   return page;
+}
+
+export async function bulkUpsertSourcePages(inputs: SourcePageInput[], existingPages: SourcePage[] = []): Promise<SourcePage[]> {
+  if (inputs.length === 0) {
+    return [];
+  }
+
+  const now = nowIso();
+  const existingRows =
+    existingPages.length > 0 || !usesSupabase()
+      ? existingPages
+      : (
+          await Promise.all(
+            [...new Set(inputs.map((input) => input.site_id))].map((siteId) => listSourcePages(siteId))
+          )
+        ).flat();
+  const existingByKey = new Map<string, SourcePage>();
+  for (const page of existingRows) {
+    existingByKey.set(sourcePageMemoryKey(page.site_id, page.path), page);
+  }
+  for (const page of memory.pages.values()) {
+    existingByKey.set(sourcePageMemoryKey(page.site_id, page.path), page);
+  }
+
+  const pages = inputs.map((input) => {
+    const existing = existingByKey.get(sourcePageMemoryKey(input.site_id, input.path));
+    return {
+      id: existing?.id ?? crypto.randomUUID(),
+      discovered_at: existing?.discovered_at ?? now,
+      updated_at: now,
+      ...input
+    };
+  });
+
+  for (const page of pages) {
+    memory.pages.set(sourcePageMemoryKey(page.site_id, page.path), page);
+  }
+
+  if (!usesSupabase()) {
+    return pages;
+  }
+
+  const supabasePages = pages.map(sourcePageForSupabase);
+  const pageByKey = new Map(pages.map((page) => [sourcePageMemoryKey(page.site_id, page.path), page]));
+  const restorePageStatus = (rows: SourcePage[]): SourcePage[] =>
+    rows.map((row) => ({
+      ...row,
+      status: pageByKey.get(sourcePageMemoryKey(row.site_id, row.path))?.status ?? row.status
+    }));
+
+  try {
+    const rows: SourcePage[] = [];
+    for (const chunk of chunks(supabasePages, 100)) {
+      rows.push(
+        ...((await supabaseRequest<SourcePage[]>("source_pages", {
+          method: "POST",
+          headers: {
+            Prefer: "resolution=merge-duplicates,return=representation"
+          },
+          query: "?on_conflict=site_id,path",
+          body: JSON.stringify(chunk)
+        })) ?? [])
+      );
+    }
+    return rows.length > 0 ? restorePageStatus(rows) : pages;
+  } catch (error) {
+    if (
+      error instanceof SupabaseRequestError &&
+      error.status === 400 &&
+      error.body.includes("source_pages_status_check")
+    ) {
+      const rows: SourcePage[] = [];
+      for (const chunk of chunks(supabasePages, 100)) {
+        rows.push(
+          ...((await supabaseRequest<SourcePage[]>("source_pages", {
+            method: "POST",
+            headers: {
+              Prefer: "resolution=merge-duplicates,return=representation"
+            },
+            query: "?on_conflict=site_id,path",
+            body: JSON.stringify(chunk)
+          })) ?? [])
+        );
+      }
+      return rows.length > 0 ? restorePageStatus(rows) : pages;
+    }
+
+    throw error;
+  }
 }
 
 export async function listSourcePages(siteId: string): Promise<SourcePage[]> {
@@ -807,11 +1011,13 @@ export async function getSiteProgress(slug: string): Promise<SiteProgress | null
     return null;
   }
 
-  const pages = await listSourcePages(site.id);
-  const mirroredPages = await listMirroredPages(site.id);
-  const llmTexts = await listSiteLlmTexts(site.id);
-  const events = await listJobEvents(site.id);
-  const jobs = await listGenerationJobs(site.id);
+  const [pages, mirroredPages, llmTexts, events, jobs] = await Promise.all([
+    listSourcePages(site.id),
+    listMirroredPages(site.id),
+    listSiteLlmTexts(site.id),
+    listJobEvents(site.id),
+    listGenerationJobs(site.id)
+  ]);
   const liveCounts = {
     discovered_count: pages.length,
     generated_count: mirroredPages.length,
@@ -895,6 +1101,20 @@ export async function listMirroredPages(siteId: string): Promise<MirroredPageSum
     .filter((page) => page.site_id === siteId)
     .map(({ html: _html, ...page }) => page)
     .sort((a, b) => `${a.lang}:${a.path}`.localeCompare(`${b.lang}:${b.path}`));
+}
+
+export async function listMirroredPagesWithHtml(siteId: string, lang: string): Promise<MirroredPage[]> {
+  if (usesSupabase()) {
+    const rows = await supabaseRequest<MirroredPage[]>("mirrored_pages", {
+      method: "GET",
+      query: `?site_id=eq.${encodeURIComponent(siteId)}&lang=eq.${encodeURIComponent(lang)}&order=path.asc`
+    });
+    return rows ?? [];
+  }
+
+  return [...memory.mirrored.values()]
+    .filter((page) => page.site_id === siteId && page.lang === lang)
+    .sort((a, b) => a.path.localeCompare(b.path));
 }
 
 export async function listMirroredPagesForSites(siteIds: string[]): Promise<Map<string, MirroredPageSummary[]>> {
@@ -1138,9 +1358,17 @@ export async function listSiteVoteStats(siteIds: string[], voterKey?: string): P
   }
 
   if (!usesSupabase()) {
+    const rowsBySite = new Map<string, SiteVote[]>();
+    for (const vote of memory.votes.values()) {
+      if (!stats.has(vote.site_id)) {
+        continue;
+      }
+      const rows = rowsBySite.get(vote.site_id) ?? [];
+      rows.push(vote);
+      rowsBySite.set(vote.site_id, rows);
+    }
     for (const siteId of siteIds) {
-      const rows = [...memory.votes.values()].filter((vote) => vote.site_id === siteId);
-      stats.set(siteId, voteStatsForRows(rows, voterKey));
+      stats.set(siteId, voteStatsForRows(rowsBySite.get(siteId) ?? [], voterKey));
     }
     return stats;
   }
@@ -1153,9 +1381,15 @@ export async function listSiteVoteStats(siteIds: string[], voterKey?: string): P
     return null;
   });
 
+  const rowsBySite = new Map<string, SiteVote[]>();
+  for (const vote of rows ?? []) {
+    const siteVotes = rowsBySite.get(vote.site_id) ?? [];
+    siteVotes.push(vote);
+    rowsBySite.set(vote.site_id, siteVotes);
+  }
+
   for (const siteId of siteIds) {
-    const siteVotes = (rows ?? []).filter((vote) => vote.site_id === siteId);
-    stats.set(siteId, voteStatsForRows(siteVotes, voterKey));
+    stats.set(siteId, voteStatsForRows(rowsBySite.get(siteId) ?? [], voterKey));
   }
 
   return stats;
@@ -1197,8 +1431,7 @@ export async function setSiteVote(siteId: string, voterKey: string, value: -1 | 
 }
 
 export async function recomputeSiteCounters(siteId: string, status?: SiteStatus): Promise<void> {
-  const pages = await listSourcePages(siteId);
-  const mirrored = await listMirroredPages(siteId);
+  const [pages, mirrored] = await Promise.all([listSourcePages(siteId), listMirroredPages(siteId)]);
   await updateDocSite(siteId, {
     ...(status ? { status } : {}),
     discovered_count: pages.length,

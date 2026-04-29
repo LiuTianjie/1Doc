@@ -1,4 +1,4 @@
-import { generateSiteLlmText, generateSiteLlmTexts } from "@/lib/mirror/llm-text";
+import { generateSiteLlmText, generateSiteLlmTexts, isEnrichedSiteLlmText } from "@/lib/mirror/llm-text";
 import { getDocSiteBySlug, getSiteLlmText } from "@/lib/mirror/store";
 
 export const runtime = "nodejs";
@@ -27,10 +27,18 @@ export async function GET(request: Request, context: { params: Promise<{ siteSlu
 
   const { searchParams } = new URL(request.url);
   const lang = normalizeLang(searchParams.get("lang"), site.target_langs[0]);
-  const llmText = await getSiteLlmText(site.id, lang);
+  let llmText = await getSiteLlmText(site.id, lang);
 
   if (!llmText) {
     return Response.json({ error: `LLM.txt has not been generated for ${lang}.` }, { status: 404 });
+  }
+
+  if (!isEnrichedSiteLlmText(llmText.content)) {
+    try {
+      llmText = await generateSiteLlmText(site.id, lang);
+    } catch (error) {
+      return Response.json({ error: storageErrorMessage(error) }, { status: 400 });
+    }
   }
 
   if (searchParams.get("format") === "txt") {

@@ -159,6 +159,14 @@ create table if not exists public.site_llm_texts (
   primary key (site_id, lang)
 );
 
+create table if not exists public.site_llm_text_locks (
+  lock_key text primary key,
+  site_id uuid not null references public.doc_sites(id) on delete cascade,
+  lang text not null,
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null
+);
+
 create index if not exists doc_sites_updated_at_idx on public.doc_sites (updated_at desc);
 create index if not exists source_pages_site_status_idx on public.source_pages (site_id, status);
 create index if not exists mirrored_pages_site_lang_path_idx on public.mirrored_pages (site_id, lang, path);
@@ -176,6 +184,8 @@ create index if not exists site_votes_site_value_idx
   on public.site_votes (site_id, value);
 create index if not exists site_llm_texts_site_lang_idx
   on public.site_llm_texts (site_id, lang);
+create index if not exists site_llm_text_locks_expires_at_idx
+  on public.site_llm_text_locks (expires_at);
 
 alter table public.doc_sites enable row level security;
 alter table public.source_pages enable row level security;
@@ -186,3 +196,4 @@ alter table public.generation_locks enable row level security;
 alter table public.job_events enable row level security;
 alter table public.site_votes enable row level security;
 alter table public.site_llm_texts enable row level security;
+alter table public.site_llm_text_locks enable row level security;

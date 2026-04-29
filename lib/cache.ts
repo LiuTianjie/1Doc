@@ -49,6 +49,14 @@ function isExpired(entry: { expires_at?: string } | null | undefined): boolean {
   return Date.parse(entry.expires_at) <= Date.now();
 }
 
+function chunks<T>(values: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    result.push(values.slice(index, index + size));
+  }
+  return result;
+}
+
 async function supabaseRequest<T>(
   table: CacheTable,
   init: RequestInit & { query?: string } = {}
@@ -103,6 +111,39 @@ async function getByKey<T>(table: CacheTable, key: string): Promise<T | null> {
   return rows?.[0] ?? null;
 }
 
+async function getByKeys<T extends { key: string }>(table: CacheTable, keys: string[]): Promise<Map<string, T>> {
+  const result = new Map<string, T>();
+  const missingKeys: string[] = [];
+
+  for (const key of keys) {
+    const memoryKey = `${table}:${key}`;
+    const inMemory = memoryStore.get(memoryKey) as T | undefined;
+    if (inMemory) {
+      result.set(key, inMemory);
+    } else {
+      missingKeys.push(key);
+    }
+  }
+
+  if (missingKeys.length === 0) {
+    return result;
+  }
+
+  for (const chunk of chunks(missingKeys, 100)) {
+    const rows = await supabaseRequest<T[]>(table, {
+      method: "GET",
+      query: `?key=in.(${chunk.map(encodeURIComponent).join(",")})`
+    });
+
+    for (const row of rows ?? []) {
+      memoryStore.set(`${table}:${row.key}`, row);
+      result.set(row.key, row);
+    }
+  }
+
+  return result;
+}
+
 async function upsert<T extends { key: string }>(table: CacheTable, value: T): Promise<void> {
   memoryStore.set(`${table}:${value.key}`, value);
 
@@ -113,6 +154,26 @@ async function upsert<T extends { key: string }>(table: CacheTable, value: T): P
     },
     body: JSON.stringify(value)
   });
+}
+
+async function upsertMany<T extends { key: string }>(table: CacheTable, values: T[]): Promise<void> {
+  if (values.length === 0) {
+    return;
+  }
+
+  for (const value of values) {
+    memoryStore.set(`${table}:${value.key}`, value);
+  }
+
+  for (const chunk of chunks(values, 100)) {
+    await supabaseRequest(table, {
+      method: "POST",
+      headers: {
+        Prefer: "resolution=merge-duplicates"
+      },
+      body: JSON.stringify(chunk)
+    });
+  }
 }
 
 export function pageCacheKey(url: string): string {
@@ -192,6 +253,37 @@ export async function getTranslationCache(
   );
 }
 
+export async function getTranslationCacheMany(
+  sourceTextHashes: string[],
+  targetLang: string
+): Promise<Map<string, TranslationCacheEntry>> {
+  const uniqueHashes = [...new Set(sourceTextHashes)];
+  const keyByHash = new Map(uniqueHashes.map((hash) => [translationCacheKey(hash, targetLang), hash]));
+  const keys = [...keyByHash.keys()];
+  const result = new Map<string, TranslationCacheEntry>();
+
+  const segmentRows = await getByKeys<TranslationCacheEntry>("translation_segments", keys);
+  for (const [key, row] of segmentRows) {
+    const hash = keyByHash.get(key);
+    if (hash) {
+      result.set(hash, row);
+    }
+  }
+
+  const missingKeys = keys.filter((key) => !segmentRows.has(key));
+  if (missingKeys.length > 0) {
+    const legacyRows = await getByKeys<TranslationCacheEntry>("translation_cache", missingKeys);
+    for (const [key, row] of legacyRows) {
+      const hash = keyByHash.get(key);
+      if (hash) {
+        result.set(hash, row);
+      }
+    }
+  }
+
+  return result;
+}
+
 export async function setTranslationCache(
   sourceTextHash: string,
   sourceText: string,
@@ -208,4 +300,21 @@ export async function setTranslationCache(
   };
   await upsert("translation_segments", entry);
   return entry;
+}
+
+export async function setTranslationCacheMany(
+  entries: Array<{ sourceTextHash: string; sourceText: string; targetLang: string; translatedText: string }>
+): Promise<TranslationCacheEntry[]> {
+  const now = nowIso();
+  const cacheEntries = entries.map((entry) => ({
+    key: translationCacheKey(entry.sourceTextHash, entry.targetLang),
+    source_text_hash: entry.sourceTextHash,
+    source_text: entry.sourceText,
+    target_lang: entry.targetLang,
+    translated_text: entry.translatedText,
+    created_at: now
+  }));
+
+  await upsertMany("translation_segments", cacheEntries);
+  return cacheEntries;
 }

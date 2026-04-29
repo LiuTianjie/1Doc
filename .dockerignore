@@ -1,0 +1,12 @@
+.git
+.github
+.next
+node_modules
+npm-debug.log*
+.env
+.env*
+!.env.example
+Dockerfile
+README*.md
+LICENSE
+.DS_Store

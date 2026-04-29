@@ -5,6 +5,7 @@ import { discoverSitePages } from "./discovery";
 import { generateSiteLlmTexts } from "./llm-text";
 import {
   addJobEvent,
+  bulkUpsertSourcePages,
   getDocSiteById,
   getMirroredPage,
   getSourcePageById,
@@ -50,6 +51,14 @@ function pageConcurrency(): number {
     return 8;
   }
   return Math.max(1, Math.min(16, Math.floor(configured)));
+}
+
+function languageConcurrency(): number {
+  const configured = Number(process.env.MIRROR_LANG_CONCURRENCY || 2);
+  if (!Number.isFinite(configured)) {
+    return 2;
+  }
+  return Math.max(1, Math.min(4, Math.floor(configured)));
 }
 
 async function runConcurrent<T>(
@@ -108,16 +117,16 @@ async function generateSourcePage(
       last_error: null
     });
 
-    let reusedCount = 0;
-    for (const lang of site.target_langs) {
+    const langResults = new Map<string, "generated" | "reused">();
+    await runConcurrent(site.target_langs, languageConcurrency(), async (lang) => {
       const existing = await getMirroredPage(site.id, lang, sourcePage.path);
       if (existing?.source_html_hash === htmlHash) {
-        reusedCount += 1;
+        langResults.set(lang, "reused");
         await addJobEvent(site.id, "info", "Page unchanged, reused mirror", {
           url: page.url,
           lang
         });
-        continue;
+        return;
       }
 
       await addJobEvent(site.id, "info", "Translating page", { url: page.url, lang });
@@ -147,11 +156,12 @@ async function generateSourcePage(
         untranslatedSegments: mirror.stats.untranslatedSegmentCount,
         rootFound: mirror.stats.rootFound
       });
-    }
+      langResults.set(lang, "generated");
+    });
 
     await upsertSourcePage({
       ...sourcePage,
-      status: reusedCount === site.target_langs.length ? "skipped" : "ready",
+      status: [...langResults.values()].every((status) => status === "reused") ? "skipped" : "ready",
       last_error: null
     });
     if (options.syncProgress) {
@@ -229,10 +239,10 @@ export async function generateMirrorSite(
       });
       const existingPages = await listSourcePages(site.id);
       const existingByPath = new Map(existingPages.map((page) => [page.path, page]));
-      for (const url of discoveredUrls) {
+      await bulkUpsertSourcePages(discoveredUrls.map((url) => {
         const path = mirrorPathFor(url);
         const existing = existingByPath.get(path);
-        await upsertSourcePage({
+        return {
           site_id: site.id,
           url,
           path,
@@ -240,8 +250,8 @@ export async function generateMirrorSite(
           html_hash: existing?.html_hash ?? null,
           status: "queued",
           last_error: null
-        });
-      }
+        };
+      }), existingPages);
     } else {
       await updateDocSite(site.id, { status: "generating", last_error: null });
       await addJobEvent(site.id, "info", "Retrying failed pages", { entryUrl: site.entry_url });
@@ -250,12 +260,12 @@ export async function generateMirrorSite(
     await recomputeSiteCounters(site.id, "generating");
     await updateJobProgress(site.id, jobId, "running");
     const concurrency = pageConcurrency();
+    const allPages = await listSourcePages(site.id);
     await addJobEvent(site.id, "info", "Generating mirrored pages", {
-      pages: (await listSourcePages(site.id)).length,
+      pages: allPages.length,
       concurrency
     });
 
-    const allPages = await listSourcePages(site.id);
     const pages = mode === "retry_failed" ? allPages.filter((page) => page.status === "failed") : allPages;
     await runConcurrent(pages, concurrency, (page) => generateSourcePage(site, page, scopePath, jobId));
     await recomputeSiteCounters(site.id, "generating");

@@ -2,6 +2,7 @@ import { sha256 } from "../hash";
 import { normalizeUserUrl } from "../url";
 
 const DEFAULT_PAGE_LIMIT = 300;
+const MAX_PAGE_LIMIT = 1000;
 const HTML_EXTENSIONS_TO_SKIP = new Set([
   ".7z",
   ".avi",
@@ -44,7 +45,7 @@ export function normalizePageLimit(value: number | undefined): number {
     return DEFAULT_PAGE_LIMIT;
   }
 
-  return Math.max(1, Math.min(300, Math.floor(value)));
+  return Math.max(1, Math.min(MAX_PAGE_LIMIT, Math.floor(value)));
 }
 
 export function rootUrlFor(entryUrl: string): string {

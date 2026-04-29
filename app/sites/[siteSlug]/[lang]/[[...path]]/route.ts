@@ -261,7 +261,7 @@ export async function GET(
   return new Response(page.html, {
     headers: {
       "content-type": "text/html; charset=utf-8",
-      "cache-control": "public, max-age=300",
+      "cache-control": "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800",
       "x-doc-native-site": site.slug,
       "x-doc-native-lang": lang,
       "x-doc-native-source-hash": page.source_html_hash

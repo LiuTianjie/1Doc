@@ -1,5 +1,5 @@
 import { textHash } from "./hash";
-import { getTranslationCache, setTranslationCache } from "./cache";
+import { getTranslationCacheMany, setTranslationCacheMany } from "./cache";
 import { translateWithArk } from "./ark";
 import { translateWithVolc } from "./volc";
 
@@ -18,6 +18,10 @@ function maxBatchItems(): number {
 
 function maxBatchChars(): number {
   return envInt("TRANSLATE_BATCH_CHARS", 3000, 300, 8000);
+}
+
+function batchConcurrency(): number {
+  return envInt("TRANSLATE_BATCH_CONCURRENCY", 2, 1, 8);
 }
 
 function splitBatches(texts: string[]): string[][] {
@@ -77,27 +81,54 @@ async function translateBatchWithFallback(batch: string[], targetLang: string): 
   }
 }
 
+async function mapConcurrent<T, R>(
+  items: T[],
+  concurrency: number,
+  handler: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await handler(items[index], index);
+      }
+    })
+  );
+
+  return results;
+}
+
 export async function translateTexts(texts: string[], targetLang: string): Promise<Map<string, string>> {
   const uniqueTexts = [...new Set(texts)];
   const translated = new Map<string, string>();
   const misses: Array<{ hash: string; text: string }> = [];
+  const cacheableTexts = uniqueTexts.filter((text) => text.length <= maxBatchChars());
 
-  await Promise.all(
-    uniqueTexts.map(async (text) => {
-      if (text.length > maxBatchChars()) {
-        translated.set(text, text);
-        return;
-      }
+  for (const text of uniqueTexts) {
+    if (text.length > maxBatchChars()) {
+      translated.set(text, text);
+    }
+  }
 
-      const hash = textHash(text);
-      const cached = await getTranslationCache(hash, targetLang);
-      if (cached) {
-        translated.set(text, cached.translated_text);
-      } else {
-        misses.push({ hash, text });
-      }
-    })
+  const hashedTexts = cacheableTexts.map((text) => ({ hash: textHash(text), text }));
+  const cachedByHash = await getTranslationCacheMany(
+    hashedTexts.map((item) => item.hash),
+    targetLang
   );
+
+  for (const item of hashedTexts) {
+    const cached = cachedByHash.get(item.hash);
+    if (cached) {
+      translated.set(item.text, cached.translated_text);
+    } else {
+      misses.push(item);
+    }
+  }
 
   if (misses.length === 0) {
     return translated;
@@ -113,15 +144,33 @@ export async function translateTexts(texts: string[], targetLang: string): Promi
     return translated;
   }
 
-  for (const batch of splitBatches(misses.map((miss) => miss.text))) {
-    const result = await translateBatchWithFallback(batch, targetLang);
-    await Promise.all(
-      batch.map(async (sourceText, index) => {
-        const translatedText = result[index] ?? sourceText;
-        translated.set(sourceText, translatedText);
-        await setTranslationCache(textHash(sourceText), sourceText, targetLang, translatedText);
-      })
-    );
+  const missByText = new Map(misses.map((miss) => [miss.text, miss]));
+  const batches = splitBatches(misses.map((miss) => miss.text));
+  const batchResults = await mapConcurrent(batches, batchConcurrency(), (batch) => translateBatchWithFallback(batch, targetLang));
+
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+    const batch = batches[batchIndex];
+    const result = batchResults[batchIndex];
+    const cacheEntries: Array<{
+      sourceTextHash: string;
+      sourceText: string;
+      targetLang: string;
+      translatedText: string;
+    }> = [];
+
+    for (let index = 0; index < batch.length; index += 1) {
+      const sourceText = batch[index];
+      const translatedText = result[index] ?? sourceText;
+      translated.set(sourceText, translatedText);
+      cacheEntries.push({
+        sourceTextHash: missByText.get(sourceText)?.hash ?? textHash(sourceText),
+        sourceText,
+        targetLang,
+        translatedText
+      });
+    }
+
+    await setTranslationCacheMany(cacheEntries);
   }
 
   return translated;

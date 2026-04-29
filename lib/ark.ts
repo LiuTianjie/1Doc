@@ -18,6 +18,14 @@ const DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 const DEFAULT_MODEL = "doubao-seed-1-6-flash-250615";
 const DEFAULT_TIMEOUT_MS = 60000;
 
+type ArkJsonCompletionInput = {
+  system: string;
+  user: unknown;
+  model?: string;
+  timeoutMs?: number;
+  errorPrefix?: string;
+};
+
 async function withTimeout<T>(work: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ms);
@@ -40,30 +48,22 @@ function extractJson(value: string): unknown {
   }
 }
 
-export async function translateWithArk(textList: string[], targetLanguage: string): Promise<string[]> {
+function validTimeout(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_TIMEOUT_MS;
+}
+
+async function completeArkJson(
+  messages: ArkMessage[],
+  model: string,
+  timeoutMs: number,
+  errorPrefix: string
+): Promise<unknown> {
   const apiKey = process.env.ARK_API_KEY;
-  const model = process.env.ARK_MODEL || DEFAULT_MODEL;
   const baseUrl = process.env.ARK_BASE_URL || DEFAULT_BASE_URL;
-  const timeoutMs = Number(process.env.ARK_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
 
   if (!apiKey) {
     throw new Error("Missing ARK_API_KEY.");
   }
-
-  const messages: ArkMessage[] = [
-    {
-      role: "system",
-      content:
-        'You are a precise documentation translator. Translate only natural language text into the target language. Preserve Markdown, inline code, placeholders, product names, URLs, paths, commands, punctuation shape, and array length. Return only valid JSON in this shape: {"translations":["..."]}.'
-    },
-    {
-      role: "user",
-      content: JSON.stringify({
-        targetLanguage,
-        texts: textList
-      })
-    }
-  ];
 
   const { response, payload } = await withTimeout(
     async (signal) => {
@@ -86,11 +86,11 @@ export async function translateWithArk(textList: string[], targetLanguage: strin
       const payload = rawPayload ? (JSON.parse(rawPayload) as ArkChatResponse) : {};
       return { response, payload };
     },
-    Number.isFinite(timeoutMs) ? timeoutMs : DEFAULT_TIMEOUT_MS
+    validTimeout(timeoutMs)
   );
 
   if (!response.ok || payload.error) {
-    throw new Error(payload.error?.message || `Ark translation failed with status ${response.status}.`);
+    throw new Error(payload.error?.message || `${errorPrefix} failed with status ${response.status}.`);
   }
 
   const content = payload.choices?.[0]?.message?.content;
@@ -98,7 +98,51 @@ export async function translateWithArk(textList: string[], targetLanguage: strin
     throw new Error("Ark model returned an empty response.");
   }
 
-  const parsed = extractJson(content);
+  return extractJson(content);
+}
+
+export async function completeJsonWithArk(input: ArkJsonCompletionInput): Promise<unknown> {
+  const model = input.model || process.env.ARK_MODEL || DEFAULT_MODEL;
+  const timeoutMs = input.timeoutMs ?? Number(process.env.ARK_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
+  const userContent = typeof input.user === "string" ? input.user : JSON.stringify(input.user);
+
+  return completeArkJson(
+    [
+      {
+        role: "system",
+        content: input.system
+      },
+      {
+        role: "user",
+        content: userContent
+      }
+    ],
+    model,
+    timeoutMs,
+    input.errorPrefix || "Ark completion"
+  );
+}
+
+export async function translateWithArk(textList: string[], targetLanguage: string): Promise<string[]> {
+  const model = process.env.ARK_MODEL || DEFAULT_MODEL;
+  const timeoutMs = Number(process.env.ARK_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
+
+  const messages: ArkMessage[] = [
+    {
+      role: "system",
+      content:
+        'You are a precise documentation translator. Translate only natural language text into the target language. Preserve Markdown, inline code, placeholders, product names, URLs, paths, commands, punctuation shape, and array length. Return only valid JSON in this shape: {"translations":["..."]}.'
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        targetLanguage,
+        texts: textList
+      })
+    }
+  ];
+
+  const parsed = await completeArkJson(messages, model, timeoutMs, "Ark translation");
   const translations = Array.isArray(parsed)
     ? parsed
     : Array.isArray((parsed as { translations?: unknown }).translations)

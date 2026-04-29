@@ -536,17 +536,22 @@ function LlmTextButton({
     }
   }
 
-  if (!lang) {
+  if (!lang || site.status !== "ready") {
     return null;
   }
 
   return (
-    <button className={`llm-copy-button${compact ? " compact" : ""}`} type="button" onClick={copyLlmText} disabled={state === "working"}>
-      <span>{state === "working" ? <i className="button-spinner mini" aria-hidden="true" /> : null}LLM.txt</span>
-      {compact ? null : (
-        <strong>{state === "copied" ? t("common.copied") : hasLlmText ? t("common.copyLlm") : t("common.generateLlm")}</strong>
-      )}
-    </button>
+    <div className="llm-copy-wrap">
+      <button className={`llm-copy-button${compact ? " compact" : ""}`} type="button" onClick={copyLlmText} disabled={state === "working"}>
+        <span>{state === "working" ? <i className="button-spinner mini" aria-hidden="true" /> : null}LLM.txt</span>
+        {compact ? null : (
+          <strong>{state === "copied" ? t("common.copied") : hasLlmText ? t("common.copyLlm") : t("common.generateLlm")}</strong>
+        )}
+      </button>
+      <span className={`llm-copy-feedback${compact ? " compact" : ""}`} role="status" aria-live="polite">
+        {state === "copied" ? t("common.copiedToClipboard") : ""}
+      </span>
+    </div>
   );
 }
 

@@ -449,7 +449,7 @@ export default function SubmitPage() {
               <input
                 id="pageLimit"
                 min="1"
-                max="300"
+                max="1000"
                 name="pageLimit"
                 type="number"
                 value={pageLimit}
