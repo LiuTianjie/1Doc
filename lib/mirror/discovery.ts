@@ -1,10 +1,16 @@
 import * as parse5 from "parse5";
-import { fetchPage } from "../fetch-page";
+import { fetchPage, hasBrowserRenderer, type FetchMode } from "../fetch-page";
 import { absoluteUrl } from "../url";
 import { canonicalPageUrl, isMirrorablePage } from "./url";
+import type { DiscoverySource } from "./types";
 
 const USER_AGENT =
   "1Doc/0.1 (+https://example.com; public documentation mirror generator)";
+
+export type DiscoveredPage = {
+  url: string;
+  source: DiscoverySource;
+};
 
 function discoveryConcurrency(): number {
   const configured = Number(process.env.MIRROR_DISCOVERY_CONCURRENCY || 8);
@@ -26,6 +32,38 @@ function scopedUrl(rawUrl: string, rootUrl: string, scopePath: string): string |
 
 function uniqueLimit(values: string[], limit: number): string[] {
   return [...new Set(values)].slice(0, limit);
+}
+
+function uniqueDiscoveredLimit(values: DiscoveredPage[], limit: number): DiscoveredPage[] {
+  const byUrl = new Map<string, DiscoveredPage>();
+  for (const value of values) {
+    if (!byUrl.has(value.url)) {
+      byUrl.set(value.url, value);
+    }
+    if (byUrl.size >= limit) {
+      break;
+    }
+  }
+
+  return [...byUrl.values()];
+}
+
+function renderedDiscoveryLimit(limit: number): number {
+  const configured = Number(process.env.MIRROR_RENDERED_DISCOVERY_LIMIT || 50);
+  if (!Number.isFinite(configured)) {
+    return Math.min(limit, 50);
+  }
+
+  return Math.max(0, Math.min(limit, Math.floor(configured)));
+}
+
+function expandedDiscoveryLimit(limit: number): number {
+  const configured = Number(process.env.MIRROR_EXPANDED_DISCOVERY_LIMIT || 20);
+  if (!Number.isFinite(configured)) {
+    return Math.min(limit, 20);
+  }
+
+  return Math.max(0, Math.min(limit, Math.floor(configured)));
 }
 
 function sitemapCandidates(entryUrl: string): string[] {
@@ -90,7 +128,7 @@ async function discoverFromSitemaps(
   rootUrl: string,
   scopePath: string,
   limit: number
-): Promise<string[]> {
+): Promise<DiscoveredPage[]> {
   const entry = new URL(entryUrl);
   const robotsText = await fetchText(`${entry.origin}/robots.txt`);
   const queue = uniqueLimit(
@@ -98,7 +136,7 @@ async function discoverFromSitemaps(
     75
   );
   const seenSitemaps = new Set<string>();
-  const pages: string[] = [];
+  const pages: DiscoveredPage[] = [];
 
   while (queue.length > 0 && pages.length < limit && seenSitemaps.size < 75) {
     const sitemapUrl = queue.shift()!;
@@ -130,7 +168,7 @@ async function discoverFromSitemaps(
 
       const pageUrl = scopedUrl(locUrl.toString(), rootUrl, scopePath);
       if (pageUrl) {
-        pages.push(pageUrl);
+        pages.push({ url: pageUrl, source: "sitemap" });
       }
       if (pages.length >= limit) {
         break;
@@ -138,7 +176,7 @@ async function discoverFromSitemaps(
     }
   }
 
-  return uniqueLimit(pages, limit);
+  return uniqueDiscoveredLimit(pages, limit);
 }
 
 function getAttrs(node: any): Array<{ name: string; value: string }> {
@@ -203,37 +241,44 @@ async function discoverFromCrawl(
   rootUrl: string,
   scopePath: string,
   limit: number,
-  seeds: string[]
-): Promise<string[]> {
-  const queue = uniqueLimit([entryUrl, ...seeds], Math.max(limit, seeds.length + 1));
+  seeds: DiscoveredPage[],
+  fetchMode: FetchMode,
+  linkSource: DiscoverySource,
+  fetchLimit = limit
+): Promise<DiscoveredPage[]> {
+  const queue = uniqueDiscoveredLimit([{ url: entryUrl, source: "manual" }, ...seeds], Math.max(limit, seeds.length + 1));
   const seen = new Set<string>();
-  const queued = new Set(queue);
-  const pages = new Set<string>();
+  const queued = new Set(queue.map((page) => page.url));
+  const pages = new Map<string, DiscoveredPage>();
   const concurrency = discoveryConcurrency();
+  let fetchCount = 0;
 
   async function worker(): Promise<void> {
-    while (pages.size < limit) {
+    while (pages.size < limit && fetchCount < fetchLimit) {
       const next = queue.shift();
       if (!next) {
         return;
       }
-      if (seen.has(next)) {
+      if (seen.has(next.url)) {
         continue;
       }
-      seen.add(next);
+      seen.add(next.url);
 
-      const canonical = scopedUrl(next, rootUrl, scopePath);
+      const canonical = scopedUrl(next.url, rootUrl, scopePath);
       if (!canonical) {
         continue;
       }
-      pages.add(canonical);
+      if (!pages.has(canonical)) {
+        pages.set(canonical, { url: canonical, source: next.source });
+      }
+      fetchCount += 1;
 
       try {
-        const fetched = await fetchPage(canonical);
+        const fetched = await fetchPage(canonical, { mode: fetchMode });
         for (const link of extractLinks(fetched.html, fetched.finalUrl, rootUrl, scopePath)) {
           if (!seen.has(link) && !queued.has(link) && queued.size < limit * 3) {
             queued.add(link);
-            queue.push(link);
+            queue.push({ url: link, source: linkSource });
           }
         }
       } catch {
@@ -243,7 +288,7 @@ async function discoverFromCrawl(
   }
 
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
-  return uniqueLimit([...pages], limit);
+  return uniqueDiscoveredLimit([...pages.values()], limit);
 }
 
 export async function discoverSitePages(
@@ -251,8 +296,49 @@ export async function discoverSitePages(
   rootUrl: string,
   scopePath: string,
   limit: number
-): Promise<string[]> {
+): Promise<DiscoveredPage[]> {
   const sitemapPages = await discoverFromSitemaps(entryUrl, rootUrl, scopePath, limit);
-  const crawledPages = await discoverFromCrawl(entryUrl, rootUrl, scopePath, limit, sitemapPages.slice(0, 25));
-  return uniqueLimit([entryUrl, ...sitemapPages, ...crawledPages], limit);
+  const staticPages = await discoverFromCrawl(
+    entryUrl,
+    rootUrl,
+    scopePath,
+    limit,
+    sitemapPages.slice(0, 25),
+    "static",
+    "static_dom"
+  );
+  const discovered = uniqueDiscoveredLimit([{ url: canonicalPageUrl(entryUrl), source: "manual" }, ...sitemapPages, ...staticPages], limit);
+
+  if (!hasBrowserRenderer() || discovered.length >= limit) {
+    return discovered;
+  }
+
+  const renderedPages = await discoverFromCrawl(
+    entryUrl,
+    rootUrl,
+    scopePath,
+    limit,
+    discovered.slice(0, renderedDiscoveryLimit(limit)),
+    "rendered",
+    "rendered_dom",
+    renderedDiscoveryLimit(limit)
+  );
+  const withRendered = uniqueDiscoveredLimit([...discovered, ...renderedPages], limit);
+
+  if (withRendered.length >= limit || expandedDiscoveryLimit(limit) === 0) {
+    return withRendered;
+  }
+
+  const interactionPages = await discoverFromCrawl(
+    entryUrl,
+    rootUrl,
+    scopePath,
+    limit,
+    withRendered.slice(0, expandedDiscoveryLimit(limit)),
+    "rendered_with_expansion",
+    "interaction",
+    expandedDiscoveryLimit(limit)
+  );
+
+  return uniqueDiscoveredLimit([...withRendered, ...interactionPages], limit);
 }

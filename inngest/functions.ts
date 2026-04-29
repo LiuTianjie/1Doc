@@ -1,4 +1,5 @@
 import { generateMirrorSite } from "@/lib/mirror/generator";
+import type { GenerationMode } from "@/lib/mirror/types";
 import { inngest } from "./client";
 
 export const generateMirrorSiteFunction = inngest.createFunction(
@@ -10,10 +11,12 @@ export const generateMirrorSiteFunction = inngest.createFunction(
     if (typeof siteId !== "string") {
       throw new Error("Missing siteId.");
     }
+    const generationMode: GenerationMode =
+      mode === "retry_failed" || mode === "refresh_existing" ? mode : "incremental";
 
     await step.run("generate mirror", async () => {
       await generateMirrorSite(siteId, typeof jobId === "string" ? jobId : undefined, {
-        mode: mode === "retry_failed" ? "retry_failed" : "incremental"
+        mode: generationMode
       });
       return { siteId };
     });

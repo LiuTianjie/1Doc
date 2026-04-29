@@ -1,6 +1,6 @@
+import { inngest } from "@/inngest/client";
 import { enqueueMirrorGeneration, isMirrorGenerationActive } from "@/lib/mirror/jobs";
 import { getDocSiteBySlug, updateDocSite } from "@/lib/mirror/store";
-import { inngest } from "@/inngest/client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,7 +24,7 @@ export async function POST(
   const generationMode = await enqueueMirrorGeneration(site.id, inngest, {
     force: true,
     trigger: "refresh",
-    mode: "refresh_existing"
+    mode: "incremental"
   });
 
   return Response.json({ siteSlug, generationMode });

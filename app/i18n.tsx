@@ -130,6 +130,8 @@ const baseMessages = {
     "detail.targetLangs": "目标语言",
     "detail.incremental": "增量刷新",
     "detail.refreshing": "刷新中",
+    "detail.rediscover": "重新发现",
+    "detail.rediscovering": "发现中",
     "detail.retryFailed": "重试失败页",
     "detail.retrying": "重试中",
     "detail.pagesTitle": "页面进度",
@@ -150,6 +152,7 @@ const baseMessages = {
     "detail.noEvents": "还没有事件",
     "detail.loadFailed": "加载详情失败。",
     "detail.refreshFailed": "刷新文档失败。",
+    "detail.rediscoverFailed": "重新发现页面失败。",
     "detail.retryFailedPagesFailed": "重试失败页面失败。",
     "detail.retryPageFailed": "重试页面失败。"
   },
@@ -266,6 +269,8 @@ const baseMessages = {
     "detail.targetLangs": "Target languages",
     "detail.incremental": "Refresh",
     "detail.refreshing": "Refreshing",
+    "detail.rediscover": "Rediscover",
+    "detail.rediscovering": "Discovering",
     "detail.retryFailed": "Retry failed",
     "detail.retrying": "Retrying",
     "detail.pagesTitle": "Page progress",
@@ -286,6 +291,7 @@ const baseMessages = {
     "detail.noEvents": "No events yet",
     "detail.loadFailed": "Failed to load detail.",
     "detail.refreshFailed": "Failed to refresh docs.",
+    "detail.rediscoverFailed": "Failed to rediscover pages.",
     "detail.retryFailedPagesFailed": "Failed to retry failed pages.",
     "detail.retryPageFailed": "Failed to retry page."
   }

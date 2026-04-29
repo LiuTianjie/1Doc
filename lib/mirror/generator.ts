@@ -1,7 +1,7 @@
-import { fetchPage } from "../fetch-page";
+import { fetchErrorCode, fetchPage, type FetchMode, type FetchPageResult } from "../fetch-page";
 import { sha256 } from "../hash";
 import { translateMirrorHtmlWithStats } from "../html";
-import { discoverSitePages } from "./discovery";
+import { discoverSitePages, type DiscoveredPage } from "./discovery";
 import { generateSiteLlmTexts } from "./llm-text";
 import {
   addJobEvent,
@@ -18,7 +18,7 @@ import {
   upsertSourcePage
 } from "./store";
 import { mirrorPathFor, scopePathFor } from "./url";
-import type { DocSite, GenerationMode, SourcePage } from "./types";
+import type { DiscoverySource, DocSite, GenerationMode, PageFetchErrorCode, PageFetchMode, SourcePage } from "./types";
 
 function titleFromHtml(html: string): string | null {
   const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
@@ -29,20 +29,86 @@ function titleFromHtml(html: string): string | null {
   return match[1].replace(/\s+/g, " ").trim() || null;
 }
 
-async function fetchPageWithRetry(url: string, attempts = 3): Promise<Awaited<ReturnType<typeof fetchPage>>> {
+type FetchAttemptResult = FetchPageResult & {
+  attemptCount: number;
+  lastAttemptedMode: PageFetchMode;
+};
+
+class FetchAttemptError extends Error {
+  constructor(
+    readonly originalError: unknown,
+    readonly attemptCount: number,
+    readonly lastAttemptedMode: PageFetchMode
+  ) {
+    super(originalError instanceof Error ? originalError.message : "fetch failed", {
+      cause: originalError
+    });
+  }
+}
+
+const FETCH_LADDER: FetchMode[] = ["static", "rendered", "rendered_with_expansion"];
+
+function fetchModeLadder(preferredMode: PageFetchMode | null): FetchMode[] {
+  if (!preferredMode) {
+    return FETCH_LADDER;
+  }
+
+  return [preferredMode, ...FETCH_LADDER.filter((mode) => mode !== preferredMode)];
+}
+
+async function fetchPageWithRetry(url: string, preferredMode: PageFetchMode | null): Promise<FetchAttemptResult> {
   let lastError: unknown;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      return await fetchPage(url);
-    } catch (error) {
-      lastError = error;
-      if (attempt < attempts) {
-        await new Promise((resolve) => setTimeout(resolve, attempt * 750));
+  let attemptCount = 0;
+  let lastAttemptedMode: PageFetchMode = preferredMode ?? "static";
+
+  for (const mode of fetchModeLadder(preferredMode)) {
+    const attemptsForMode = mode === "static" ? 2 : 1;
+    for (let attempt = 1; attempt <= attemptsForMode; attempt += 1) {
+      attemptCount += 1;
+      lastAttemptedMode = mode;
+      try {
+        const fetched = await fetchPage(url, { mode });
+        return {
+          ...fetched,
+          attemptCount,
+          lastAttemptedMode: fetched.fetchMode
+        };
+      } catch (error) {
+        lastError = error;
+        if (attempt < attemptsForMode) {
+          await new Promise((resolve) => setTimeout(resolve, attempt * 750));
+        }
       }
     }
   }
 
-  throw lastError instanceof Error ? lastError : new Error("fetch failed");
+  throw new FetchAttemptError(lastError, attemptCount, lastAttemptedMode);
+}
+
+function generationFetchErrorCode(error: unknown): PageFetchErrorCode {
+  return fetchErrorCode(error instanceof FetchAttemptError ? error.originalError : error) as PageFetchErrorCode;
+}
+
+function sourceCounts(pages: DiscoveredPage[]): Record<DiscoverySource, number> {
+  return pages.reduce(
+    (counts, page) => {
+      counts[page.source] += 1;
+      return counts;
+    },
+    { sitemap: 0, static_dom: 0, rendered_dom: 0, interaction: 0, manual: 0 } satisfies Record<DiscoverySource, number>
+  );
+}
+
+function fetchModeCounts(pages: SourcePage[]): Record<PageFetchMode, number> {
+  return pages.reduce(
+    (counts, page) => {
+      if (page.last_fetch_mode) {
+        counts[page.last_fetch_mode] += 1;
+      }
+      return counts;
+    },
+    { static: 0, rendered: 0, rendered_with_expansion: 0 } satisfies Record<PageFetchMode, number>
+  );
 }
 
 function pageConcurrency(): number {
@@ -102,11 +168,16 @@ async function generateSourcePage(
   jobId?: string,
   options: { syncProgress?: boolean } = {}
 ): Promise<void> {
+  let attemptCount = page.attempt_count ?? 0;
+  let lastFetchMode = page.last_fetch_mode;
+  let typedError: PageFetchErrorCode | null = null;
   try {
-    await upsertSourcePage({ ...page, status: "fetching", last_error: null });
-    await addJobEvent(site.id, "info", "Fetching page", { url: page.url });
+    await upsertSourcePage({ ...page, status: "fetching", last_error: null, typed_error: null });
+    await addJobEvent(site.id, "info", "Fetching page", { url: page.url, preferredFetchMode: page.last_fetch_mode });
 
-    const fetched = await fetchPageWithRetry(page.url);
+    const fetched = await fetchPageWithRetry(page.url, page.typed_error ? null : page.last_fetch_mode);
+    attemptCount += fetched.attemptCount;
+    lastFetchMode = fetched.fetchMode;
     const htmlHash = sha256(fetched.html);
     const pageTitle = titleFromHtml(fetched.html);
     const sourcePage = await upsertSourcePage({
@@ -114,7 +185,16 @@ async function generateSourcePage(
       title: pageTitle,
       html_hash: htmlHash,
       status: "translating",
-      last_error: null
+      last_error: null,
+      last_fetch_mode: fetched.fetchMode,
+      attempt_count: attemptCount,
+      typed_error: null
+    });
+    await addJobEvent(site.id, "info", "Page fetched", {
+      url: page.url,
+      fetchMode: fetched.fetchMode,
+      rendered: fetched.rendered,
+      attempts: fetched.attemptCount
     });
 
     const langResults = new Map<string, "generated" | "reused">();
@@ -162,21 +242,35 @@ async function generateSourcePage(
     await upsertSourcePage({
       ...sourcePage,
       status: [...langResults.values()].every((status) => status === "reused") ? "skipped" : "ready",
-      last_error: null
+      last_error: null,
+      last_fetch_mode: fetched.fetchMode,
+      attempt_count: attemptCount,
+      typed_error: null
     });
     if (options.syncProgress) {
       await recomputeSiteCounters(site.id);
       await updateJobProgress(site.id, jobId);
     }
   } catch (error) {
+    if (error instanceof FetchAttemptError) {
+      attemptCount += error.attemptCount;
+      lastFetchMode = error.lastAttemptedMode;
+    }
+    typedError = generationFetchErrorCode(error);
     await upsertSourcePage({
       ...page,
       status: "failed",
-      last_error: error instanceof Error ? error.message : "Unknown page generation error."
+      last_error: error instanceof Error ? error.message : "Unknown page generation error.",
+      last_fetch_mode: lastFetchMode,
+      attempt_count: attemptCount,
+      typed_error: typedError
     });
     await addJobEvent(site.id, "error", "Page generation failed", {
       url: page.url,
-      error: error instanceof Error ? error.message : "Unknown error"
+      error: error instanceof Error ? error.message : "Unknown error",
+      typedError,
+      fetchMode: lastFetchMode,
+      attempts: attemptCount
     });
     if (options.syncProgress) {
       await recomputeSiteCounters(site.id);
@@ -231,27 +325,35 @@ export async function generateMirrorSite(
       await updateDocSite(site.id, { status: "discovering", last_error: null });
       await addJobEvent(site.id, "info", "Discovering pages", { entryUrl: site.entry_url });
 
-      const discoveredUrls = await discoverSitePages(site.entry_url, site.root_url, scopePath, site.page_limit);
+      const discoveredPages = await discoverSitePages(site.entry_url, site.root_url, scopePath, site.page_limit);
       await addJobEvent(site.id, "info", "Pages discovered", {
-        count: discoveredUrls.length,
+        count: discoveredPages.length,
         limit: site.page_limit,
-        limitReached: discoveredUrls.length >= site.page_limit
+        limitReached: discoveredPages.length >= site.page_limit,
+        sources: sourceCounts(discoveredPages)
       });
       const existingPages = await listSourcePages(site.id);
       const existingByPath = new Map(existingPages.map((page) => [page.path, page]));
-      await bulkUpsertSourcePages(discoveredUrls.map((url) => {
-        const path = mirrorPathFor(url);
+      await bulkUpsertSourcePages(discoveredPages.map((discovered) => {
+        const path = mirrorPathFor(discovered.url);
         const existing = existingByPath.get(path);
         return {
           site_id: site.id,
-          url,
+          url: discovered.url,
           path,
           title: existing?.title ?? null,
           html_hash: existing?.html_hash ?? null,
           status: "queued",
-          last_error: null
+          last_error: null,
+          discovery_source: existing?.discovery_source ?? discovered.source,
+          last_fetch_mode: existing?.last_fetch_mode ?? null,
+          attempt_count: existing?.attempt_count ?? 0,
+          typed_error: null
         };
       }), existingPages);
+    } else if (mode === "refresh_existing") {
+      await updateDocSite(site.id, { status: "generating", last_error: null });
+      await addJobEvent(site.id, "info", "Refreshing existing pages", { entryUrl: site.entry_url });
     } else {
       await updateDocSite(site.id, { status: "generating", last_error: null });
       await addJobEvent(site.id, "info", "Retrying failed pages", { entryUrl: site.entry_url });
@@ -263,7 +365,8 @@ export async function generateMirrorSite(
     const allPages = await listSourcePages(site.id);
     await addJobEvent(site.id, "info", "Generating mirrored pages", {
       pages: allPages.length,
-      concurrency
+      concurrency,
+      fetchModes: fetchModeCounts(allPages)
     });
 
     const pages = mode === "retry_failed" ? allPages.filter((page) => page.status === "failed") : allPages;
@@ -283,6 +386,15 @@ export async function generateMirrorSite(
     }
 
     const finalPages = await listSourcePages(site.id);
+    await addJobEvent(site.id, "info", "Fetch mode summary", {
+      fetchModes: fetchModeCounts(finalPages),
+      failedTypedErrors: finalPages.reduce<Record<string, number>>((counts, page) => {
+        if (page.typed_error) {
+          counts[page.typed_error] = (counts[page.typed_error] ?? 0) + 1;
+        }
+        return counts;
+      }, {})
+    });
     const hasReady = finalPages.some((page) => page.status === "ready" || page.status === "skipped");
     await recomputeSiteCounters(site.id, hasReady ? "ready" : "failed");
     if (hasReady) {

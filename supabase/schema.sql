@@ -69,15 +69,52 @@ create table if not exists public.source_pages (
   html_hash text,
   status text not null check (status in ('queued', 'fetching', 'translating', 'publishing', 'ready', 'skipped', 'failed')),
   last_error text,
+  discovery_source text,
+  last_fetch_mode text,
+  attempt_count integer not null default 0,
+  typed_error text,
   discovered_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (site_id, path)
 );
 
+alter table public.source_pages add column if not exists discovery_source text;
+alter table public.source_pages add column if not exists last_fetch_mode text;
+alter table public.source_pages add column if not exists attempt_count integer not null default 0;
+alter table public.source_pages add column if not exists typed_error text;
+
 alter table public.source_pages drop constraint if exists source_pages_status_check;
 alter table public.source_pages
   add constraint source_pages_status_check
   check (status in ('queued', 'fetching', 'translating', 'publishing', 'ready', 'skipped', 'failed'));
+
+alter table public.source_pages drop constraint if exists source_pages_discovery_source_check;
+alter table public.source_pages
+  add constraint source_pages_discovery_source_check
+  check (discovery_source is null or discovery_source in ('sitemap', 'static_dom', 'rendered_dom', 'interaction', 'manual'));
+
+alter table public.source_pages drop constraint if exists source_pages_last_fetch_mode_check;
+alter table public.source_pages
+  add constraint source_pages_last_fetch_mode_check
+  check (last_fetch_mode is null or last_fetch_mode in ('static', 'rendered', 'rendered_with_expansion'));
+
+alter table public.source_pages drop constraint if exists source_pages_typed_error_check;
+alter table public.source_pages
+  add constraint source_pages_typed_error_check
+  check (
+    typed_error is null or typed_error in (
+      'blocked_url',
+      'empty_dom',
+      'http_error',
+      'network_error',
+      'non_html',
+      'render_crash',
+      'render_unavailable',
+      'timeout',
+      'too_many_redirects',
+      'unknown'
+    )
+  );
 
 create table if not exists public.mirrored_pages (
   id uuid primary key,

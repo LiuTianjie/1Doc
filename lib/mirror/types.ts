@@ -1,5 +1,18 @@
 export type SiteStatus = "queued" | "discovering" | "generating" | "ready" | "failed";
 export type PageStatus = "queued" | "fetching" | "translating" | "publishing" | "ready" | "skipped" | "failed";
+export type DiscoverySource = "sitemap" | "static_dom" | "rendered_dom" | "interaction" | "manual";
+export type PageFetchMode = "static" | "rendered" | "rendered_with_expansion";
+export type PageFetchErrorCode =
+  | "blocked_url"
+  | "empty_dom"
+  | "http_error"
+  | "network_error"
+  | "non_html"
+  | "render_crash"
+  | "render_unavailable"
+  | "timeout"
+  | "too_many_redirects"
+  | "unknown";
 
 export type DocSite = {
   id: string;
@@ -29,6 +42,10 @@ export type SourcePage = {
   html_hash: string | null;
   status: PageStatus;
   last_error: string | null;
+  discovery_source: DiscoverySource | null;
+  last_fetch_mode: PageFetchMode | null;
+  attempt_count: number;
+  typed_error: PageFetchErrorCode | null;
   discovered_at: string;
   updated_at: string;
 };
@@ -97,7 +114,7 @@ export type GenerationJob = {
   finished_at: string | null;
 };
 
-export type GenerationMode = "incremental" | "retry_failed";
+export type GenerationMode = "incremental" | "refresh_existing" | "retry_failed";
 
 export type CreateSiteInput = {
   entryUrl: string;

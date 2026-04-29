@@ -31,8 +31,21 @@ function isComplete(site: Awaited<ReturnType<typeof getDocSiteById>>): boolean {
   return site.generated_count >= site.discovered_count * site.target_langs.length;
 }
 
-function isActiveSiteStatus(status: string): boolean {
+export function isActiveSiteStatus(status: string): boolean {
   return status === "queued" || status === "discovering" || status === "generating";
+}
+
+export async function isMirrorGenerationActive(
+  siteId: string,
+  site?: Awaited<ReturnType<typeof getDocSiteById>>
+): Promise<boolean> {
+  const [activeJob, currentSite] = await Promise.all([getActiveGenerationJob(siteId), site ? Promise.resolve(site) : getDocSiteById(siteId)]);
+
+  if (activeJob && !isStale(activeJob.updated_at)) {
+    return true;
+  }
+
+  return Boolean(currentSite && isActiveSiteStatus(currentSite.status) && !isStale(currentSite.updated_at));
 }
 
 export async function enqueueMirrorGeneration(

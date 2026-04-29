@@ -119,6 +119,10 @@ function compactUrl(value: string): string {
   }
 }
 
+function isActiveStatus(status: SiteStatus): boolean {
+  return status === "queued" || status === "discovering" || status === "generating";
+}
+
 function eventText(event: JobEventDetail): string {
   const error = typeof event.metadata.error === "string" ? event.metadata.error : "";
   const url = typeof event.metadata.url === "string" ? event.metadata.url : "";
@@ -145,6 +149,7 @@ export default function SiteDetailPage() {
   const [isLoadingMorePages, setIsLoadingMorePages] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [rediscovering, setRediscovering] = useState(false);
   const [retryingFailed, setRetryingFailed] = useState(false);
   const [retryingPageId, setRetryingPageId] = useState<string | null>(null);
   const [llmTextState, setLlmTextState] = useState<"idle" | "working" | "copied">("idle");
@@ -273,7 +278,7 @@ export default function SiteDetailPage() {
   }, [nextPageCursor, pageFilter, isLoadingPages, isLoadingMorePages]);
 
   async function refreshSite() {
-    if (!progress) return;
+    if (!progress || isActiveStatus(progress.site.status)) return;
     setRefreshing(true);
     setError(null);
     try {
@@ -290,8 +295,26 @@ export default function SiteDetailPage() {
     }
   }
 
+  async function rediscoverSite() {
+    if (!progress || isActiveStatus(progress.site.status)) return;
+    setRediscovering(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/sites/${progress.site.slug}/rediscover`, { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || t("detail.rediscoverFailed"));
+      }
+      await Promise.all([loadProgress(), loadPages(pageFilter)]);
+    } catch (rediscoverError) {
+      setError(rediscoverError instanceof Error ? rediscoverError.message : t("detail.rediscoverFailed"));
+    } finally {
+      setRediscovering(false);
+    }
+  }
+
   async function retryFailedPages() {
-    if (!progress) return;
+    if (!progress || isActiveStatus(progress.site.status)) return;
     setRetryingFailed(true);
     setError(null);
     try {
@@ -381,6 +404,7 @@ export default function SiteDetailPage() {
 
   const recentEvents = (progress?.events ?? []).slice(-12).reverse();
   const counts = progress ? liveCounts(progress) : null;
+  const hasActiveGeneration = progress ? isActiveStatus(progress.site.status) : false;
 
   function statusLabel(status: SiteStatus): string {
     const labels: Record<SiteStatus, string> = {
@@ -493,12 +517,16 @@ export default function SiteDetailPage() {
                     </span>
                   </div>
                 ) : null}
-                <button className="ghost-button loading-button" type="button" onClick={refreshSite} disabled={refreshing}>
+                <button className="ghost-button loading-button" type="button" onClick={refreshSite} disabled={refreshing || hasActiveGeneration}>
                   {refreshing ? <span className="button-spinner" aria-hidden="true" /> : null}
                   {refreshing ? t("detail.refreshing") : t("detail.incremental")}
                 </button>
+                <button className="ghost-button loading-button" type="button" onClick={rediscoverSite} disabled={rediscovering || hasActiveGeneration}>
+                  {rediscovering ? <span className="button-spinner" aria-hidden="true" /> : null}
+                  {rediscovering ? t("detail.rediscovering") : t("detail.rediscover")}
+                </button>
                 {(counts?.failed ?? 0) > 0 ? (
-                  <button className="ghost-button loading-button" type="button" onClick={retryFailedPages} disabled={retryingFailed}>
+                  <button className="ghost-button loading-button" type="button" onClick={retryFailedPages} disabled={retryingFailed || hasActiveGeneration}>
                     {retryingFailed ? <span className="button-spinner" aria-hidden="true" /> : null}
                     {retryingFailed ? t("detail.retrying") : t("detail.retryFailed")}
                   </button>

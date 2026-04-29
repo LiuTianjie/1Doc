@@ -93,7 +93,11 @@ export async function POST(
         title: null,
         html_hash: null,
         status: "queued",
-        last_error: null
+        last_error: null,
+        discovery_source: "manual",
+        last_fetch_mode: null,
+        attempt_count: 0,
+        typed_error: null
       }));
 
     void retryMirrorPage(site.id, page.id).catch((error) => {

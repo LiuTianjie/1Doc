@@ -60,7 +60,9 @@ type SiteLlmTextLock = {
   expires_at: string;
 };
 
-type SourcePageInput = Omit<SourcePage, "id" | "discovered_at" | "updated_at">;
+type SourcePageMetadataFields = "discovery_source" | "last_fetch_mode" | "attempt_count" | "typed_error";
+type SourcePageInput = Omit<SourcePage, "id" | "discovered_at" | "updated_at" | SourcePageMetadataFields> &
+  Partial<Pick<SourcePage, SourcePageMetadataFields>>;
 export type SiteListCursor = Pick<DocSite, "updated_at" | "id">;
 export type SourcePageListCursor = Pick<SourcePage, "path" | "id">;
 export type SourcePageFilter = "all" | "active" | "failed" | "ready";
@@ -258,11 +260,48 @@ function legacyPageStatus(status: SourcePage["status"]): SourcePage["status"] {
   return status;
 }
 
+function normalizeSourcePage(row: Partial<SourcePage> & Pick<SourcePage, "id" | "site_id" | "url" | "path">): SourcePage {
+  const now = nowIso();
+  return {
+    id: row.id,
+    site_id: row.site_id,
+    url: row.url,
+    path: row.path,
+    title: row.title ?? null,
+    html_hash: row.html_hash ?? null,
+    status: row.status ?? "queued",
+    last_error: row.last_error ?? null,
+    discovery_source: row.discovery_source ?? null,
+    last_fetch_mode: row.last_fetch_mode ?? null,
+    attempt_count: row.attempt_count ?? 0,
+    typed_error: row.typed_error ?? null,
+    discovered_at: row.discovered_at ?? now,
+    updated_at: row.updated_at ?? row.discovered_at ?? now
+  };
+}
+
 function sourcePageForSupabase(page: SourcePage): SourcePage {
   return {
     ...page,
     status: legacyPageStatus(page.status)
   };
+}
+
+function sourcePageForLegacySupabase(page: SourcePage): Omit<SourcePage, SourcePageMetadataFields> {
+  const { discovery_source, last_fetch_mode, attempt_count, typed_error, ...legacyPage } = sourcePageForSupabase(page);
+  void discovery_source;
+  void last_fetch_mode;
+  void attempt_count;
+  void typed_error;
+  return legacyPage;
+}
+
+function isMissingSourcePageMetadataColumn(error: unknown): boolean {
+  return (
+    error instanceof SupabaseRequestError &&
+    error.status === 400 &&
+    /discovery_source|last_fetch_mode|attempt_count|typed_error/i.test(error.body)
+  );
 }
 
 function sameStringArray(a: string[], b: string[]): boolean {
@@ -927,12 +966,16 @@ export async function upsertSourcePage(input: SourcePageInput): Promise<SourcePa
   }
 
   const now = nowIso();
-  const page: SourcePage = {
+  const page = normalizeSourcePage({
     id: existing?.id ?? crypto.randomUUID(),
     discovered_at: existing?.discovered_at ?? now,
     updated_at: now,
+    discovery_source: input.discovery_source ?? existing?.discovery_source ?? null,
+    last_fetch_mode: input.last_fetch_mode ?? existing?.last_fetch_mode ?? null,
+    attempt_count: input.attempt_count ?? existing?.attempt_count ?? 0,
+    typed_error: input.typed_error ?? existing?.typed_error ?? null,
     ...input
-  };
+  });
 
   memory.pages.set(sourcePageMemoryKey(page.site_id, page.path), page);
 
@@ -947,8 +990,20 @@ export async function upsertSourcePage(input: SourcePageInput): Promise<SourcePa
         query: "?on_conflict=site_id,path",
         body: JSON.stringify(supabasePage)
       });
-      return rows?.[0] ? { ...rows[0], status: page.status } : page;
+      return rows?.[0] ? normalizeSourcePage({ ...rows[0], status: page.status }) : page;
     } catch (error) {
+      if (isMissingSourcePageMetadataColumn(error)) {
+        const rows = await supabaseRequest<SourcePage[]>("source_pages", {
+          method: "POST",
+          headers: {
+            Prefer: "resolution=merge-duplicates,return=representation"
+          },
+          query: "?on_conflict=site_id,path",
+          body: JSON.stringify(sourcePageForLegacySupabase(page))
+        });
+        return rows?.[0] ? normalizeSourcePage({ ...rows[0], ...page }) : page;
+      }
+
       if (
         error instanceof SupabaseRequestError &&
         error.status === 400 &&
@@ -963,7 +1018,7 @@ export async function upsertSourcePage(input: SourcePageInput): Promise<SourcePa
           query: "?on_conflict=site_id,path",
           body: JSON.stringify(supabasePage)
         });
-        return rows?.[0] ? { ...rows[0], status: page.status } : page;
+        return rows?.[0] ? normalizeSourcePage({ ...rows[0], status: page.status }) : page;
       }
 
       throw error;
@@ -997,12 +1052,16 @@ export async function bulkUpsertSourcePages(inputs: SourcePageInput[], existingP
 
   const pages = inputs.map((input) => {
     const existing = existingByKey.get(sourcePageMemoryKey(input.site_id, input.path));
-    return {
+    return normalizeSourcePage({
       id: existing?.id ?? crypto.randomUUID(),
       discovered_at: existing?.discovered_at ?? now,
       updated_at: now,
+      discovery_source: input.discovery_source ?? existing?.discovery_source ?? null,
+      last_fetch_mode: input.last_fetch_mode ?? existing?.last_fetch_mode ?? null,
+      attempt_count: input.attempt_count ?? existing?.attempt_count ?? 0,
+      typed_error: input.typed_error ?? existing?.typed_error ?? null,
       ...input
-    };
+    });
   });
 
   for (const page of pages) {
@@ -1017,7 +1076,7 @@ export async function bulkUpsertSourcePages(inputs: SourcePageInput[], existingP
   const pageByKey = new Map(pages.map((page) => [sourcePageMemoryKey(page.site_id, page.path), page]));
   const restorePageStatus = (rows: SourcePage[]): SourcePage[] =>
     rows.map((row) => ({
-      ...row,
+      ...normalizeSourcePage(row),
       status: pageByKey.get(sourcePageMemoryKey(row.site_id, row.path))?.status ?? row.status
     }));
 
@@ -1037,6 +1096,23 @@ export async function bulkUpsertSourcePages(inputs: SourcePageInput[], existingP
     }
     return rows.length > 0 ? restorePageStatus(rows) : pages;
   } catch (error) {
+    if (isMissingSourcePageMetadataColumn(error)) {
+      const rows: SourcePage[] = [];
+      for (const chunk of chunks(pages.map(sourcePageForLegacySupabase), 100)) {
+        rows.push(
+          ...((await supabaseRequest<SourcePage[]>("source_pages", {
+            method: "POST",
+            headers: {
+              Prefer: "resolution=merge-duplicates,return=representation"
+            },
+            query: "?on_conflict=site_id,path",
+            body: JSON.stringify(chunk)
+          })) ?? [])
+        );
+      }
+      return rows.length > 0 ? restorePageStatus(rows) : pages;
+    }
+
     if (
       error instanceof SupabaseRequestError &&
       error.status === 400 &&
@@ -1064,10 +1140,11 @@ export async function bulkUpsertSourcePages(inputs: SourcePageInput[], existingP
 
 export async function listSourcePages(siteId: string): Promise<SourcePage[]> {
   if (usesSupabase()) {
-    return supabaseRequestAll<SourcePage>(
+    const rows = await supabaseRequestAll<SourcePage>(
       "source_pages",
       `?site_id=eq.${encodeURIComponent(siteId)}&order=path.asc,id.asc`
     );
+    return rows.map(normalizeSourcePage);
   }
 
   return [...memory.pages.values()].filter((page) => page.site_id === siteId).sort(compareSourcePagesForList);
@@ -1094,7 +1171,7 @@ export async function listSourcePagesPage(input: {
         method: "GET",
         query: `?site_id=eq.${encodeURIComponent(input.siteId)}${statusFilter}${cursorFilter}&order=path.asc,id.asc&limit=${pageSize}`
       })) ?? [];
-    const pages = rows.slice(0, limit);
+    const pages = rows.slice(0, limit).map(normalizeSourcePage);
     const nextCursor =
       rows.length > limit && pages.length > 0 ? { path: pages[pages.length - 1].path, id: pages[pages.length - 1].id } : null;
 
@@ -1121,7 +1198,7 @@ export async function getSourcePage(siteId: string, path: string): Promise<Sourc
         query: `?site_id=eq.${encodeURIComponent(siteId)}&path=eq.${encodeURIComponent(candidate)}&limit=1`
       });
       if (rows?.[0]) {
-        return rows[0];
+        return normalizeSourcePage(rows[0]);
       }
     } else {
       const inMemory = memory.pages.get(sourcePageMemoryKey(siteId, candidate));
@@ -1140,7 +1217,7 @@ export async function getSourcePageById(siteId: string, pageId: string): Promise
       method: "GET",
       query: `?site_id=eq.${encodeURIComponent(siteId)}&id=eq.${encodeURIComponent(pageId)}&limit=1`
     });
-    return rows?.[0] ?? null;
+    return rows?.[0] ? normalizeSourcePage(rows[0]) : null;
   }
 
   return [...memory.pages.values()].find((page) => page.site_id === siteId && page.id === pageId) ?? null;

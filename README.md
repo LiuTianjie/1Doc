@@ -85,6 +85,8 @@ INNGEST_DEV=
 SITE_BASE_URL=http://localhost:3000
 MIRROR_PAGE_CONCURRENCY=8
 MIRROR_LANG_CONCURRENCY=2
+MIRROR_RENDERED_DISCOVERY_LIMIT=50
+MIRROR_EXPANDED_DISCOVERY_LIMIT=20
 TRANSLATE_BATCH_CONCURRENCY=2
 TRANSLATE_BATCH_ITEMS=12
 TRANSLATE_BATCH_CHARS=3000
@@ -97,8 +99,10 @@ Notes:
 - `ARK_MODEL` can be a model name or an Ark endpoint ID such as `ep-...`.
 - `MIRROR_PAGE_CONCURRENCY` defaults to `8` and is capped at `16`.
 - `MIRROR_LANG_CONCURRENCY` controls per-page target-language parallelism and defaults to `2`.
+- `MIRROR_RENDERED_DISCOVERY_LIMIT` caps how many pages use browser-rendered link discovery per site.
+- `MIRROR_EXPANDED_DISCOVERY_LIMIT` caps how many pages use browser-rendered discovery after safe UI expansion per site.
 - `TRANSLATE_BATCH_CONCURRENCY` controls parallel model batches and defaults to `2`.
-- `BROWSERLESS_WS_URL` is optional. When configured, 1Doc can fall back to rendered HTML for SPA-like pages.
+- `BROWSERLESS_WS_URL` is optional. When configured, 1Doc can use rendered and expanded discovery for JavaScript-heavy pages.
 - `SUPABASE_SERVICE_ROLE_KEY` must only be used on the server. Do not expose it to browser code.
 
 ## Supabase Setup
