@@ -1,18 +1,21 @@
 import {
   createOrReuseDocSite,
-  listDocSites,
+  listCardMirroredPagesForSites,
+  listDocSitesPage,
   listLatestJobEventsForSites,
   listMirroredPages,
-  listMirroredPagesForSites,
   listSiteLlmTextsForSites,
   listSiteVoteStats
 } from "@/lib/mirror/store";
 import { enqueueMirrorGeneration } from "@/lib/mirror/jobs";
 import { inngest } from "@/inngest/client";
 import { localFaviconUrl } from "@/lib/favicon";
+import { decodeCursor, encodeCursor, normalizeLimit } from "@/lib/pagination";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+const DEFAULT_SITE_LIMIT = 24;
+const MAX_SITE_LIMIT = 48;
 
 function voterKeyFromRequest(request: Request): string | undefined {
   const { searchParams } = new URL(request.url);
@@ -21,56 +24,54 @@ function voterKeyFromRequest(request: Request): string | undefined {
 }
 
 export async function GET(request: Request) {
-  const sites = await listDocSites();
+  const { searchParams } = new URL(request.url);
+  const limit = normalizeLimit(searchParams.get("limit"), DEFAULT_SITE_LIMIT, MAX_SITE_LIMIT);
+  const voterKey = voterKeyFromRequest(request);
+  const cursor = decodeCursor<{ updated_at: string; id: string }>(searchParams.get("cursor"), ["updated_at", "id"]);
+  const page = await listDocSitesPage({ limit, cursor });
+  const sites = page.sites;
   const siteIds = sites.map((site) => site.id);
   const [voteStats, latestEvents, mirroredPagesBySite, llmTextsBySite] = await Promise.all([
-    listSiteVoteStats(siteIds, voterKeyFromRequest(request)),
+    listSiteVoteStats(siteIds, voterKey),
     listLatestJobEventsForSites(siteIds),
-    listMirroredPagesForSites(siteIds),
+    listCardMirroredPagesForSites(sites),
     listSiteLlmTextsForSites(siteIds)
   ]);
+
   const siteCards = sites.map((site) => {
-      const mirroredPages = mirroredPagesBySite.get(site.id) ?? [];
-      const llmTexts = llmTextsBySite.get(site.id) ?? [];
-      return {
-        ...site,
-        ...(voteStats.get(site.id) ?? { upvote_count: 0, downvote_count: 0, vote_score: 0, user_vote: 0 }),
-        faviconUrl: localFaviconUrl(site.entry_url),
-        latestEvent: latestEvents.get(site.id) ?? null,
-        llmTexts: llmTexts.map(({ lang, page_count, generated_at, updated_at }) => ({
-          lang,
-          page_count,
-          generated_at,
-          updated_at
-        })),
-        mirrorUrls: site.target_langs
-          .map((lang) => {
-            const mirroredPage =
-              mirroredPages.find((page) => page.lang === lang && page.path === site.entry_path) ??
-              mirroredPages.find((page) => page.lang === lang);
+    const mirroredPages = mirroredPagesBySite.get(site.id) ?? [];
+    const llmTexts = llmTextsBySite.get(site.id) ?? [];
+    return {
+      ...site,
+      ...(voteStats.get(site.id) ?? { upvote_count: 0, downvote_count: 0, vote_score: 0, user_vote: 0 }),
+      faviconUrl: localFaviconUrl(site.entry_url),
+      latestEvent: latestEvents.get(site.id) ?? null,
+      llmTexts: llmTexts.map(({ lang, page_count, generated_at, updated_at }) => ({
+        lang,
+        page_count,
+        generated_at,
+        updated_at
+      })),
+      mirrorUrls: site.target_langs
+        .map((lang) => {
+          const mirroredPage =
+            mirroredPages.find((page) => page.lang === lang && page.path === site.entry_path) ??
+            mirroredPages.find((page) => page.lang === lang);
 
-            return mirroredPage
-              ? {
-                  lang,
-                  url: `/sites/${site.slug}/${lang}${mirroredPage.path}`
-                }
-              : null;
-          })
-          .filter((url): url is { lang: string; url: string } => Boolean(url))
-      };
-    });
-  const displayableSiteCards = siteCards.filter((site) => site.status !== "ready" || site.mirrorUrls.length > 0);
-
-  displayableSiteCards.sort(
-    (a, b) =>
-      b.vote_score - a.vote_score ||
-      b.upvote_count - a.upvote_count ||
-      b.generated_count - a.generated_count ||
-      b.updated_at.localeCompare(a.updated_at)
-  );
+          return mirroredPage
+            ? {
+                lang,
+                url: `/sites/${site.slug}/${lang}${mirroredPage.path}`
+              }
+            : null;
+        })
+        .filter((url): url is { lang: string; url: string } => Boolean(url))
+    };
+  });
 
   return Response.json({
-    sites: displayableSiteCards
+    sites: siteCards,
+    nextCursor: encodeCursor(page.nextCursor)
   });
 }
 

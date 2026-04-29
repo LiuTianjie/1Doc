@@ -1,9 +1,18 @@
 import { retryMirrorPage } from "@/lib/mirror/generator";
-import { getDocSiteBySlug, getSourcePage, upsertSourcePage } from "@/lib/mirror/store";
+import {
+  getDocSiteBySlug,
+  getSourcePage,
+  listSiteSourcePageItems,
+  type SourcePageFilter,
+  upsertSourcePage
+} from "@/lib/mirror/store";
 import { canonicalPageUrl, isMirrorablePage, mirrorPathFor, normalizeMirrorPath } from "@/lib/mirror/url";
+import { decodeCursor, encodeCursor, normalizeLimit } from "@/lib/pagination";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+const DEFAULT_PAGE_LIMIT = 30;
+const MAX_PAGE_LIMIT = 48;
 
 function redirectToDetail(request: Request, siteSlug: string): Response {
   return Response.redirect(new URL(`/sites/${siteSlug}`, request.url), 303);
@@ -17,6 +26,34 @@ function jsonOrRedirect(request: Request, siteSlug: string, payload: Record<stri
   }
 
   return Response.json(payload, { status });
+}
+
+function normalizeFilter(value: string | null): SourcePageFilter {
+  return value === "active" || value === "failed" || value === "ready" ? value : "all";
+}
+
+export async function GET(
+  request: Request,
+  context: { params: Promise<{ siteSlug: string }> }
+) {
+  const { siteSlug } = await context.params;
+  const site = await getDocSiteBySlug(siteSlug);
+
+  if (!site) {
+    return Response.json({ error: "Site not found." }, { status: 404 });
+  }
+
+  const { searchParams } = new URL(request.url);
+  const filter = normalizeFilter(searchParams.get("filter"));
+  const limit = normalizeLimit(searchParams.get("limit"), DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
+  const cursor = decodeCursor<{ path: string; id: string }>(searchParams.get("cursor"), ["path", "id"]);
+  const page = await listSiteSourcePageItems({ site, filter, limit, cursor });
+
+  return Response.json({
+    pages: page.pages,
+    counts: page.counts,
+    nextCursor: encodeCursor(page.nextCursor)
+  });
 }
 
 export async function POST(

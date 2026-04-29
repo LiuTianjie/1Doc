@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 
 type SiteStatus = "queued" | "discovering" | "generating" | "ready" | "failed";
@@ -42,23 +42,66 @@ export function MirrorSearch() {
   const [query, setQuery] = useState("");
   const [sites, setSites] = useState<SiteCard[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const nextCursorRef = useRef<string | null>(null);
+  const loadingMoreRef = useRef(false);
 
-  async function loadSites() {
-    setIsLoading(true);
+  function updateNextCursor(value: string | null) {
+    nextCursorRef.current = value;
+    setNextCursor(value);
+  }
+
+  function appendSites(current: SiteCard[], incoming: SiteCard[]): SiteCard[] {
+    const currentIds = new Set(current.map((site) => site.id));
+    return [...current, ...incoming.filter((site) => !currentIds.has(site.id))];
+  }
+
+  async function loadSites(keyword: string, options: { append?: boolean; cursor?: string | null; signal?: AbortSignal } = {}) {
+    if (options.append) {
+      const cursor = options.cursor ?? nextCursorRef.current;
+      if (!cursor || loadingMoreRef.current) {
+        return;
+      }
+      loadingMoreRef.current = true;
+      setIsLoadingMore(true);
+    } else {
+      setIsLoading(true);
+    }
     try {
-      const response = await fetch("/api/sites", { cache: "no-store" });
-      const payload = (await response.json()) as { sites?: SiteCard[]; error?: string };
+      const params = new URLSearchParams();
+      if (keyword.trim()) {
+        params.set("q", keyword.trim());
+      }
+      const cursor = options.append ? options.cursor ?? nextCursorRef.current : options.cursor;
+      if (cursor) {
+        params.set("cursor", cursor);
+      }
+      const response = await fetch(`/api/sites/search${params.toString() ? `?${params.toString()}` : ""}`, {
+        cache: "no-store",
+        signal: options.signal
+      });
+      const payload = (await response.json()) as { sites?: SiteCard[]; nextCursor?: string | null; error?: string };
       if (!response.ok || !payload.sites) {
         throw new Error(payload.error || t("common.loadFailed"));
       }
-      setSites(payload.sites);
+      setSites((current) => (options.append ? appendSites(current, payload.sites ?? []) : payload.sites ?? []));
+      updateNextCursor(payload.nextCursor ?? null);
       setError(null);
     } catch (loadError) {
+      if (loadError instanceof DOMException && loadError.name === "AbortError") {
+        return;
+      }
       setError(loadError instanceof Error ? loadError.message : t("common.loadFailed"));
     } finally {
       setIsLoading(false);
+      setIsLoadingMore(false);
+      if (options.append) {
+        loadingMoreRef.current = false;
+      }
     }
   }
 
@@ -82,31 +125,37 @@ export function MirrorSearch() {
       return;
     }
 
-    loadSites();
     window.setTimeout(() => inputRef.current?.focus(), 0);
-  }, [open]);
 
-  const results = useMemo(() => {
-    const keyword = query.trim().toLowerCase();
-    const sorted = [...sites].sort((a, b) => {
-      const aReady = a.status === "ready" ? 0 : 1;
-      const bReady = b.status === "ready" ? 0 : 1;
-      return aReady - bReady || b.vote_score - a.vote_score || b.upvote_count - a.upvote_count || b.generated_count - a.generated_count;
-    });
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      updateNextCursor(null);
+      void loadSites(query, { signal: controller.signal });
+    }, query.trim() ? 180 : 0);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [open, query]);
 
-    if (!keyword) {
-      return sorted.slice(0, 8);
+  useEffect(() => {
+    const node = resultsRef.current;
+    if (!open || query.trim() || !node || !nextCursor || isLoading || isLoadingMore) {
+      return;
     }
 
-    return sorted
-      .filter((site) => {
-        const haystack = [siteDisplayName(site), site.slug, site.entry_url, hostname(site.entry_url), site.target_langs.join(" ")]
-          .join(" ")
-          .toLowerCase();
-        return haystack.includes(keyword);
-      })
-      .slice(0, 12);
-  }, [query, sites]);
+    const resultsNode = node;
+    function onScroll() {
+      const cursor = nextCursorRef.current;
+      if (resultsNode.scrollTop + resultsNode.clientHeight >= resultsNode.scrollHeight - 80 && cursor && !loadingMoreRef.current) {
+        void loadSites("", { append: true, cursor });
+      }
+    }
+
+    resultsNode.addEventListener("scroll", onScroll);
+    onScroll();
+    return () => resultsNode.removeEventListener("scroll", onScroll);
+  }, [open, query, nextCursor, isLoading, isLoadingMore]);
 
   function statusLabel(status: SiteStatus): string {
     const labels: Record<SiteStatus, string> = {
@@ -146,7 +195,11 @@ export function MirrorSearch() {
               <kbd>Esc</kbd>
             </div>
 
-            <div className={`spotlight-results${isLoading ? " is-loading" : ""}`} aria-busy={isLoading ? "true" : undefined}>
+            <div
+              ref={resultsRef}
+              className={`spotlight-results${isLoading ? " is-loading" : ""}`}
+              aria-busy={isLoading || isLoadingMore ? "true" : undefined}
+            >
               {isLoading ? (
                 <div className="spotlight-empty loading-inline">
                   <span className="button-spinner" aria-hidden="true" />
@@ -154,10 +207,10 @@ export function MirrorSearch() {
                 </div>
               ) : null}
               {error ? <div className="spotlight-empty">{error}</div> : null}
-              {!isLoading && !error && results.length === 0 ? (
+              {!isLoading && !error && sites.length === 0 ? (
                 <div className="spotlight-empty">{t("search.empty")}</div>
               ) : null}
-              {results.map((site) => (
+              {sites.map((site) => (
                 <a className="spotlight-result" href={resultHref(site)} key={site.id}>
                   <SiteFavicon site={site} />
                   <div>
@@ -167,6 +220,14 @@ export function MirrorSearch() {
                   <em>{site.status === "ready" ? t("search.open") : statusLabel(site.status)}</em>
                 </a>
               ))}
+              {isLoadingMore ? (
+                <div className="spotlight-load-more loading-inline">
+                  <span className="button-spinner" aria-hidden="true" />
+                  {t("common.loading")}
+                </div>
+              ) : !isLoading && sites.length > 0 && !nextCursor ? (
+                <div className="spotlight-load-more">{t("common.noMore")}</div>
+              ) : null}
             </div>
 
             <div className="spotlight-footer">

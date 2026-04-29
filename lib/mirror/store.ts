@@ -61,6 +61,21 @@ type SiteLlmTextLock = {
 };
 
 type SourcePageInput = Omit<SourcePage, "id" | "discovered_at" | "updated_at">;
+export type SiteListCursor = Pick<DocSite, "updated_at" | "id">;
+export type SourcePageListCursor = Pick<SourcePage, "path" | "id">;
+export type SourcePageFilter = "all" | "active" | "failed" | "ready";
+export type SourcePageListItem = Omit<SourcePage, "site_id"> & {
+  generatedCount: number;
+  generatedLangs: string[];
+  mirrorUrlsByLang: Record<string, string>;
+  mirroredPages: Array<Pick<MirroredPageSummary, "lang" | "path" | "source_html_hash" | "generated_at">>;
+};
+export type SourcePageListCounts = {
+  all: number;
+  active: number;
+  failed: number;
+  ready: number;
+};
 
 const globalForMirror = globalThis as typeof globalThis & {
   __docNativeMirrorMemory?: MirrorMemory;
@@ -262,6 +277,48 @@ function chunks<T>(values: T[], size: number): T[][] {
   return result;
 }
 
+function compareDocSitesForList(a: DocSite, b: DocSite): number {
+  return b.updated_at.localeCompare(a.updated_at) || b.id.localeCompare(a.id);
+}
+
+function compareSourcePagesForList(a: SourcePage, b: SourcePage): number {
+  return a.path.localeCompare(b.path) || a.id.localeCompare(b.id);
+}
+
+function isAfterSiteCursor(site: DocSite, cursor?: SiteListCursor): boolean {
+  if (!cursor) {
+    return true;
+  }
+
+  return site.updated_at < cursor.updated_at || (site.updated_at === cursor.updated_at && site.id < cursor.id);
+}
+
+function isAfterSourcePageCursor(page: SourcePage, cursor?: SourcePageListCursor): boolean {
+  if (!cursor) {
+    return true;
+  }
+
+  return page.path > cursor.path || (page.path === cursor.path && page.id > cursor.id);
+}
+
+function sourcePageMatchesFilter(
+  page: SourcePage,
+  generatedCount: number,
+  targetLangCount: number,
+  filter: SourcePageFilter
+): boolean {
+  if (filter === "failed") {
+    return page.status === "failed";
+  }
+  if (filter === "active") {
+    return page.status !== "failed" && generatedCount < targetLangCount;
+  }
+  if (filter === "ready") {
+    return generatedCount >= targetLangCount;
+  }
+  return true;
+}
+
 function isSiteActive(site: DocSite): boolean {
   if (!["queued", "discovering", "generating"].includes(site.status)) {
     return false;
@@ -398,6 +455,81 @@ export async function listDocSites(): Promise<DocSite[]> {
   }
 
   return [...memory.sites.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+}
+
+export async function listDocSitesPage(input: { limit: number; cursor?: SiteListCursor }): Promise<{
+  sites: DocSite[];
+  nextCursor: SiteListCursor | null;
+}> {
+  const limit = Math.max(1, input.limit);
+  const pageSize = limit + 1;
+
+  if (usesSupabase()) {
+    const cursorFilter = input.cursor
+      ? `&or=(updated_at.lt.${encodeURIComponent(input.cursor.updated_at)},and(updated_at.eq.${encodeURIComponent(
+          input.cursor.updated_at
+        )},id.lt.${encodeURIComponent(input.cursor.id)}))`
+      : "";
+    const rows =
+      (await supabaseRequest<DocSite[]>("doc_sites", {
+        method: "GET",
+        query: `?order=updated_at.desc,id.desc&limit=${pageSize}${cursorFilter}`
+      })) ?? [];
+    const sites = rows.slice(0, limit);
+    const nextCursor =
+      rows.length > limit && sites.length > 0
+        ? { updated_at: sites[sites.length - 1].updated_at, id: sites[sites.length - 1].id }
+        : null;
+
+    return { sites, nextCursor };
+  }
+
+  const rows = [...memory.sites.values()]
+    .sort(compareDocSitesForList)
+    .filter((site) => isAfterSiteCursor(site, input.cursor));
+  const sites = rows.slice(0, limit);
+  const nextCursor =
+    rows.length > limit && sites.length > 0
+      ? { updated_at: sites[sites.length - 1].updated_at, id: sites[sites.length - 1].id }
+      : null;
+
+  return { sites, nextCursor };
+}
+
+export async function searchDocSites(keyword: string, limit: number): Promise<DocSite[]> {
+  const normalized = keyword.trim().toLowerCase();
+  const pageSize = normalized ? Math.max(limit * 6, 80) : limit;
+
+  if (usesSupabase()) {
+    const searchFilter = normalized
+      ? `&or=(slug.ilike.*${encodeURIComponent(normalized)}*,entry_url.ilike.*${encodeURIComponent(normalized)}*)`
+      : "";
+    const rows =
+      (await supabaseRequest<DocSite[]>("doc_sites", {
+        method: "GET",
+        query: `?order=updated_at.desc,id.desc&limit=${pageSize}${searchFilter}`
+      })) ?? [];
+    return rows
+      .filter((site) => {
+        if (!normalized) {
+          return true;
+        }
+        const haystack = [site.slug, site.entry_url, site.root_url, site.target_langs.join(" ")].join(" ").toLowerCase();
+        return haystack.includes(normalized);
+      })
+      .slice(0, limit);
+  }
+
+  return [...memory.sites.values()]
+    .sort(compareDocSitesForList)
+    .filter((site) => {
+      if (!normalized) {
+        return true;
+      }
+      const haystack = [site.slug, site.entry_url, site.root_url, site.target_langs.join(" ")].join(" ").toLowerCase();
+      return haystack.includes(normalized);
+    })
+    .slice(0, limit);
 }
 
 export async function resetSiteContent(siteId: string): Promise<void> {
@@ -932,14 +1064,53 @@ export async function bulkUpsertSourcePages(inputs: SourcePageInput[], existingP
 
 export async function listSourcePages(siteId: string): Promise<SourcePage[]> {
   if (usesSupabase()) {
-    const rows = await supabaseRequest<SourcePage[]>("source_pages", {
-      method: "GET",
-      query: `?site_id=eq.${encodeURIComponent(siteId)}&order=path.asc`
-    });
-    return rows ?? [];
+    return supabaseRequestAll<SourcePage>(
+      "source_pages",
+      `?site_id=eq.${encodeURIComponent(siteId)}&order=path.asc,id.asc`
+    );
   }
 
-  return [...memory.pages.values()].filter((page) => page.site_id === siteId).sort((a, b) => a.path.localeCompare(b.path));
+  return [...memory.pages.values()].filter((page) => page.site_id === siteId).sort(compareSourcePagesForList);
+}
+
+export async function listSourcePagesPage(input: {
+  siteId: string;
+  limit: number;
+  cursor?: SourcePageListCursor;
+  status?: SourcePage["status"];
+}): Promise<{ pages: SourcePage[]; nextCursor: SourcePageListCursor | null }> {
+  const limit = Math.max(1, input.limit);
+  const pageSize = limit + 1;
+
+  if (usesSupabase()) {
+    const statusFilter = input.status ? `&status=eq.${encodeURIComponent(input.status)}` : "";
+    const cursorFilter = input.cursor
+      ? `&or=(path.gt.${encodeURIComponent(input.cursor.path)},and(path.eq.${encodeURIComponent(input.cursor.path)},id.gt.${encodeURIComponent(
+          input.cursor.id
+        )}))`
+      : "";
+    const rows =
+      (await supabaseRequest<SourcePage[]>("source_pages", {
+        method: "GET",
+        query: `?site_id=eq.${encodeURIComponent(input.siteId)}${statusFilter}${cursorFilter}&order=path.asc,id.asc&limit=${pageSize}`
+      })) ?? [];
+    const pages = rows.slice(0, limit);
+    const nextCursor =
+      rows.length > limit && pages.length > 0 ? { path: pages[pages.length - 1].path, id: pages[pages.length - 1].id } : null;
+
+    return { pages, nextCursor };
+  }
+
+  const rows = [...memory.pages.values()]
+    .filter((page) => page.site_id === input.siteId)
+    .filter((page) => !input.status || page.status === input.status)
+    .sort(compareSourcePagesForList)
+    .filter((page) => isAfterSourcePageCursor(page, input.cursor));
+  const pages = rows.slice(0, limit);
+  const nextCursor =
+    rows.length > limit && pages.length > 0 ? { path: pages[pages.length - 1].path, id: pages[pages.length - 1].id } : null;
+
+  return { pages, nextCursor };
 }
 
 export async function getSourcePage(siteId: string, path: string): Promise<SourcePage | null> {
@@ -1174,6 +1345,241 @@ export async function listMirroredPagesForSites(siteIds: string[]): Promise<Map<
   }
 
   return result;
+}
+
+export async function listCardMirroredPagesForSites(sites: DocSite[]): Promise<Map<string, MirroredPageSummary[]>> {
+  const result = new Map<string, MirroredPageSummary[]>();
+  const neededKeys = new Set<string>();
+  const siteById = new Map(sites.map((site) => [site.id, site]));
+
+  for (const site of sites) {
+    result.set(site.id, []);
+    for (const lang of site.target_langs) {
+      neededKeys.add(`${site.id}:${lang}`);
+    }
+  }
+
+  if (sites.length === 0) {
+    return result;
+  }
+
+  function addFirst(mirror: MirroredPageSummary): void {
+    const site = siteById.get(mirror.site_id);
+    const key = `${mirror.site_id}:${mirror.lang}`;
+    if (!site || !site.target_langs.includes(mirror.lang) || !neededKeys.has(key)) {
+      return;
+    }
+
+    result.get(mirror.site_id)?.push(mirror);
+    neededKeys.delete(key);
+  }
+
+  if (!usesSupabase()) {
+    const mirrors = [...memory.mirrored.values()]
+      .filter((page) => result.has(page.site_id))
+      .map(({ html: _html, ...summary }) => summary)
+      .sort((a, b) => a.path.localeCompare(b.path));
+
+    for (const site of sites) {
+      for (const lang of site.target_langs) {
+        const mirror =
+          mirrors.find((item) => item.site_id === site.id && item.lang === lang && item.path === site.entry_path) ??
+          mirrors.find((item) => item.site_id === site.id && item.lang === lang);
+        if (mirror) {
+          addFirst(mirror);
+        }
+      }
+    }
+    return result;
+  }
+
+  const siteIds = sites.map((site) => site.id);
+  const entryPaths = [...new Set(sites.map((site) => site.entry_path))];
+  const entryRows =
+    (await supabaseRequest<MirroredPageSummary[]>("mirrored_pages", {
+      method: "GET",
+      query: `?select=id,site_id,source_page_id,lang,path,source_html_hash,generated_at,updated_at&site_id=in.(${siteIds
+        .map(encodeURIComponent)
+        .join(",")})&path=in.(${entryPaths.map(encodeURIComponent).join(",")})&order=site_id.asc,lang.asc,path.asc`
+    })) ?? [];
+
+  for (const row of entryRows) {
+    const site = siteById.get(row.site_id);
+    if (site && row.path === site.entry_path) {
+      addFirst(row);
+    }
+  }
+
+  if (neededKeys.size === 0) {
+    return result;
+  }
+
+  const missingSiteIds = [...new Set([...neededKeys].map((key) => key.split(":")[0]))];
+  const missingLangs = [...new Set([...neededKeys].map((key) => key.split(":")[1]))];
+  const fallbackRows = await supabaseRequestAll<MirroredPageSummary>(
+    "mirrored_pages",
+    `?select=id,site_id,source_page_id,lang,path,source_html_hash,generated_at,updated_at&site_id=in.(${missingSiteIds
+      .map(encodeURIComponent)
+      .join(",")})&lang=in.(${missingLangs.map(encodeURIComponent).join(",")})&order=site_id.asc,lang.asc,path.asc`
+  );
+
+  for (const row of fallbackRows) {
+    addFirst(row);
+    if (neededKeys.size === 0) {
+      break;
+    }
+  }
+
+  return result;
+}
+
+export async function listMirroredPagesForSourcePageIds(
+  siteId: string,
+  sourcePageIds: string[]
+): Promise<Map<string, MirroredPageSummary[]>> {
+  const result = new Map<string, MirroredPageSummary[]>();
+  for (const pageId of sourcePageIds) {
+    result.set(pageId, []);
+  }
+
+  if (sourcePageIds.length === 0) {
+    return result;
+  }
+
+  if (!usesSupabase()) {
+    for (const page of memory.mirrored.values()) {
+      if (page.site_id !== siteId || !result.has(page.source_page_id)) {
+        continue;
+      }
+      const { html: _html, ...summary } = page;
+      result.get(page.source_page_id)?.push(summary);
+    }
+  } else {
+    for (const ids of chunks(sourcePageIds, 100)) {
+      const rows =
+        (await supabaseRequest<MirroredPageSummary[]>("mirrored_pages", {
+          method: "GET",
+          query: `?select=id,site_id,source_page_id,lang,path,source_html_hash,generated_at,updated_at&site_id=eq.${encodeURIComponent(
+            siteId
+          )}&source_page_id=in.(${ids.map(encodeURIComponent).join(",")})&order=source_page_id.asc,lang.asc`
+        })) ?? [];
+
+      for (const row of rows) {
+        result.get(row.source_page_id)?.push(row);
+      }
+    }
+  }
+
+  for (const pages of result.values()) {
+    pages.sort((a, b) => a.lang.localeCompare(b.lang));
+  }
+
+  return result;
+}
+
+function sitePageCounts(
+  pages: SourcePage[],
+  mirroredBySourcePageId: Map<string, MirroredPageSummary[]>,
+  targetLangCount: number
+): SourcePageListCounts {
+  const counts: SourcePageListCounts = { all: pages.length, active: 0, failed: 0, ready: 0 };
+  for (const page of pages) {
+    const generatedCount = mirroredBySourcePageId.get(page.id)?.length ?? 0;
+    if (page.status === "failed") {
+      counts.failed += 1;
+    }
+    if (page.status !== "failed" && generatedCount < targetLangCount) {
+      counts.active += 1;
+    }
+    if (generatedCount >= targetLangCount) {
+      counts.ready += 1;
+    }
+  }
+  return counts;
+}
+
+function sourcePageListItem(
+  site: DocSite,
+  page: SourcePage,
+  mirrors: MirroredPageSummary[]
+): SourcePageListItem {
+  const mirrorUrlsByLang: Record<string, string> = {};
+  for (const mirror of mirrors) {
+    mirrorUrlsByLang[mirror.lang] = `/sites/${site.slug}/${mirror.lang}${mirror.path}`;
+  }
+
+  const { site_id: _siteId, ...sourcePage } = page;
+  return {
+    ...sourcePage,
+    generatedCount: mirrors.length,
+    generatedLangs: mirrors.map((mirror) => mirror.lang),
+    mirrorUrlsByLang,
+    mirroredPages: mirrors.map(({ lang, path, source_html_hash, generated_at }) => ({
+      lang,
+      path,
+      source_html_hash,
+      generated_at
+    }))
+  };
+}
+
+export async function listSiteSourcePageItems(input: {
+  site: DocSite;
+  filter: SourcePageFilter;
+  limit: number;
+  cursor?: SourcePageListCursor;
+}): Promise<{
+  pages: SourcePageListItem[];
+  nextCursor: SourcePageListCursor | null;
+  counts: SourcePageListCounts;
+}> {
+  const limit = Math.max(1, input.limit);
+  const [allPages, allMirrors] = await Promise.all([listSourcePages(input.site.id), listMirroredPages(input.site.id)]);
+  const allMirrorsBySourcePageId = new Map<string, MirroredPageSummary[]>();
+  for (const mirror of allMirrors) {
+    const mirrors = allMirrorsBySourcePageId.get(mirror.source_page_id) ?? [];
+    mirrors.push(mirror);
+    allMirrorsBySourcePageId.set(mirror.source_page_id, mirrors);
+  }
+  const counts = sitePageCounts(allPages, allMirrorsBySourcePageId, input.site.target_langs.length);
+
+  if (input.filter === "all" || input.filter === "failed") {
+    const sourcePage = await listSourcePagesPage({
+      siteId: input.site.id,
+      limit,
+      cursor: input.cursor,
+      status: input.filter === "failed" ? "failed" : undefined
+    });
+    const mirrorsByPageId = await listMirroredPagesForSourcePageIds(
+      input.site.id,
+      sourcePage.pages.map((page) => page.id)
+    );
+    return {
+      pages: sourcePage.pages.map((page) => sourcePageListItem(input.site, page, mirrorsByPageId.get(page.id) ?? [])),
+      nextCursor: sourcePage.nextCursor,
+      counts
+    };
+  }
+
+  const matchingPages = allPages
+    .filter((page) => isAfterSourcePageCursor(page, input.cursor))
+    .filter((page) =>
+      sourcePageMatchesFilter(
+        page,
+        allMirrorsBySourcePageId.get(page.id)?.length ?? 0,
+        input.site.target_langs.length,
+        input.filter
+      )
+    );
+  const pages = matchingPages.slice(0, limit);
+  const nextCursor =
+    matchingPages.length > limit && pages.length > 0 ? { path: pages[pages.length - 1].path, id: pages[pages.length - 1].id } : null;
+
+  return {
+    pages: pages.map((page) => sourcePageListItem(input.site, page, allMirrorsBySourcePageId.get(page.id) ?? [])),
+    nextCursor,
+    counts
+  };
 }
 
 export async function upsertSiteLlmText(

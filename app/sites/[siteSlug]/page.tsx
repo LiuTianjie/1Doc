@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { GitHubLink } from "../../components/GitHubLink";
 import { MirrorSearch } from "../../components/MirrorSearch";
@@ -55,12 +55,19 @@ type SiteProgress = {
     updated_at: string;
     faviconUrl: string | null;
   };
-  pages: SourcePageDetail[];
-  mirroredPages: MirroredPageDetail[];
   llmTexts: Array<{ lang: string; page_count: number; generated_at: string; updated_at: string }>;
   events: JobEventDetail[];
   mirrorUrls: Array<{ lang: string; url: string }>;
 };
+
+type SourcePageListItem = SourcePageDetail & {
+  generatedCount: number;
+  generatedLangs: string[];
+  mirrorUrlsByLang: Record<string, string>;
+  mirroredPages: MirroredPageDetail[];
+};
+
+type PageCounts = Record<PageFilter, number>;
 
 function formatTime(value: string, locale: string): string {
   if (!value) {
@@ -83,15 +90,15 @@ function progressFor(progress: SiteProgress | null): number {
     return 100;
   }
 
-  const expected = Math.max(progress.pages.length * progress.site.target_langs.length, 1);
-  return Math.min(100, Math.round((progress.mirroredPages.length / expected) * 100));
+  const expected = Math.max(progress.site.discovered_count * progress.site.target_langs.length, 1);
+  return Math.min(100, Math.round((progress.site.generated_count / expected) * 100));
 }
 
 function liveCounts(progress: SiteProgress) {
   return {
-    discovered: progress.pages.length,
-    generated: progress.mirroredPages.length,
-    failed: progress.pages.filter((page) => page.status === "failed").length
+    discovered: progress.site.discovered_count,
+    generated: progress.site.generated_count,
+    failed: progress.site.failed_count
   };
 }
 
@@ -129,13 +136,36 @@ export default function SiteDetailPage() {
   const params = useParams<{ siteSlug: string }>();
   const siteSlug = params.siteSlug;
   const [progress, setProgress] = useState<SiteProgress | null>(null);
+  const [pages, setPages] = useState<SourcePageListItem[]>([]);
+  const [pageCounts, setPageCounts] = useState<PageCounts>({ all: 0, active: 0, failed: 0, ready: 0 });
+  const [nextPageCursor, setNextPageCursor] = useState<string | null>(null);
   const [pageFilter, setPageFilter] = useState<PageFilter>("all");
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingPages, setIsLoadingPages] = useState(true);
+  const [isLoadingMorePages, setIsLoadingMorePages] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [retryingFailed, setRetryingFailed] = useState(false);
   const [retryingPageId, setRetryingPageId] = useState<string | null>(null);
   const [llmTextState, setLlmTextState] = useState<"idle" | "working" | "copied">("idle");
+  const loadMorePagesRef = useRef<HTMLDivElement>(null);
+  const nextPageCursorRef = useRef<string | null>(null);
+  const loadingMorePagesRef = useRef(false);
+
+  function updateNextPageCursor(value: string | null) {
+    nextPageCursorRef.current = value;
+    setNextPageCursor(value);
+  }
+
+  function appendPages(current: SourcePageListItem[], incoming: SourcePageListItem[]): SourcePageListItem[] {
+    const existingIds = new Set(current.map((page) => page.id));
+    return [...current, ...incoming.filter((page) => !existingIds.has(page.id))];
+  }
+
+  function mergeFirstPage(current: SourcePageListItem[], incoming: SourcePageListItem[]): SourcePageListItem[] {
+    const incomingIds = new Set(incoming.map((page) => page.id));
+    return [...incoming, ...current.filter((page) => !incomingIds.has(page.id))];
+  }
 
   async function loadProgress() {
     try {
@@ -153,35 +183,94 @@ export default function SiteDetailPage() {
     }
   }
 
+  async function loadPages(
+    filter = pageFilter,
+    options: { append?: boolean; cursor?: string | null; silent?: boolean } = {}
+  ) {
+    if (options.append) {
+      const cursor = options.cursor ?? nextPageCursorRef.current;
+      if (!cursor || loadingMorePagesRef.current) {
+        return;
+      }
+      loadingMorePagesRef.current = true;
+      setIsLoadingMorePages(true);
+    } else if (!options.silent) {
+      setIsLoadingPages(true);
+    }
+
+    try {
+      const params = new URLSearchParams({ filter });
+      const cursor = options.append ? options.cursor ?? nextPageCursorRef.current : options.cursor;
+      if (cursor) {
+        params.set("cursor", cursor);
+      }
+      const response = await fetch(`/api/sites/${siteSlug}/pages?${params.toString()}`, { cache: "no-store" });
+      const payload = (await response.json()) as {
+        pages?: SourcePageListItem[];
+        counts?: PageCounts;
+        nextCursor?: string | null;
+        error?: string;
+      };
+      if (!response.ok || !payload.pages || !payload.counts) {
+        throw new Error(payload.error || t("detail.loadFailed"));
+      }
+
+      setPages((current) => {
+        if (options.append) {
+          return appendPages(current, payload.pages ?? []);
+        }
+        if (options.silent) {
+          return mergeFirstPage(current, payload.pages ?? []);
+        }
+        return payload.pages ?? [];
+      });
+      setPageCounts(payload.counts);
+      if (!options.silent || options.append) {
+        updateNextPageCursor(payload.nextCursor ?? null);
+      }
+      setError(null);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : t("detail.loadFailed"));
+    } finally {
+      setIsLoadingPages(false);
+      setIsLoadingMorePages(false);
+      if (options.append) {
+        loadingMorePagesRef.current = false;
+      }
+    }
+  }
+
   useEffect(() => {
+    setPages([]);
+    updateNextPageCursor(null);
+    setIsLoadingPages(true);
     loadProgress();
-    const timer = window.setInterval(loadProgress, 2500);
+    loadPages(pageFilter);
+    const timer = window.setInterval(() => {
+      loadProgress();
+      loadPages(pageFilter, { silent: true });
+    }, 2500);
     return () => window.clearInterval(timer);
-  }, [siteSlug]);
+  }, [siteSlug, pageFilter]);
 
-  const generatedByPath = useMemo(() => {
-    const map = new Map<string, MirroredPageDetail[]>();
-    for (const mirror of progress?.mirroredPages ?? []) {
-      const current = map.get(mirror.path) ?? [];
-      current.push(mirror);
-      map.set(mirror.path, current);
-    }
-    return map;
-  }, [progress]);
-
-  const filteredPages = useMemo(() => {
-    if (!progress) {
-      return [];
+  useEffect(() => {
+    const node = loadMorePagesRef.current;
+    if (!node || !nextPageCursor || isLoadingPages || isLoadingMorePages) {
+      return;
     }
 
-    return progress.pages.filter((page) => {
-      const generatedCount = generatedByPath.get(page.path)?.length ?? 0;
-      if (pageFilter === "failed") return page.status === "failed";
-      if (pageFilter === "active") return page.status !== "failed" && generatedCount < progress.site.target_langs.length;
-      if (pageFilter === "ready") return generatedCount >= progress.site.target_langs.length;
-      return true;
-    });
-  }, [generatedByPath, pageFilter, progress]);
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const cursor = nextPageCursorRef.current;
+        if (entries.some((entry) => entry.isIntersecting) && cursor && !loadingMorePagesRef.current) {
+          void loadPages(pageFilter, { append: true, cursor, silent: true });
+        }
+      },
+      { rootMargin: "280px" }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [nextPageCursor, pageFilter, isLoadingPages, isLoadingMorePages]);
 
   async function refreshSite() {
     if (!progress) return;
@@ -193,7 +282,7 @@ export default function SiteDetailPage() {
       if (!response.ok) {
         throw new Error(payload.error || t("detail.refreshFailed"));
       }
-      await loadProgress();
+      await Promise.all([loadProgress(), loadPages(pageFilter)]);
     } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : t("detail.refreshFailed"));
     } finally {
@@ -211,7 +300,7 @@ export default function SiteDetailPage() {
       if (!response.ok) {
         throw new Error(payload.error || t("detail.retryFailedPagesFailed"));
       }
-      await loadProgress();
+      await Promise.all([loadProgress(), loadPages(pageFilter)]);
     } catch (retryError) {
       setError(retryError instanceof Error ? retryError.message : t("detail.retryFailedPagesFailed"));
     } finally {
@@ -229,7 +318,7 @@ export default function SiteDetailPage() {
       if (!response.ok) {
         throw new Error(payload.error || t("detail.retryPageFailed"));
       }
-      await loadProgress();
+      await Promise.all([loadProgress(), loadPages(pageFilter)]);
     } catch (retryError) {
       setError(retryError instanceof Error ? retryError.message : t("detail.retryPageFailed"));
     } finally {
@@ -427,7 +516,7 @@ export default function SiteDetailPage() {
                     <h2>{t("detail.pagesTitle")}</h2>
                   </div>
                   <span className="detail-count">
-                    {filteredPages.length} / {progress.pages.length} {t("common.pages")}
+                    {pageCounts[pageFilter]} / {pageCounts.all} {t("common.pages")}
                   </span>
                 </div>
                 <div className="detail-toolbar">
@@ -458,20 +547,23 @@ export default function SiteDetailPage() {
                     <span>{t("detail.table.updated")}</span>
                     <span>{t("detail.table.action")}</span>
                   </div>
-                  {filteredPages.length === 0 ? (
+                  {isLoadingPages && pages.length === 0 ? (
+                    <div className="empty-state compact-empty loading-inline">
+                      <span className="button-spinner" aria-hidden="true" />
+                      {t("common.loading")}
+                    </div>
+                  ) : pages.length === 0 ? (
                     <div className="empty-state compact-empty">{t("detail.emptyPages")}</div>
                   ) : (
-                    filteredPages.map((page) => {
-                      const generated = generatedByPath.get(page.path) ?? [];
-                      const generatedLangs = generated.map((mirror) => mirror.lang);
-                      const generatedByLang = new Map(generated.map((mirror) => [mirror.lang, mirror]));
-                      const status = pageStatusLabel(page, generated.length, progress.site.target_langs.length);
+                    pages.map((page) => {
+                      const generatedLangs = page.generatedLangs;
+                      const status = pageStatusLabel(page, page.generatedCount, progress.site.target_langs.length);
                       const visualStatus =
-                        page.status === "ready" && generated.length < progress.site.target_langs.length
+                        page.status === "ready" && page.generatedCount < progress.site.target_langs.length
                           ? "generating"
                           : page.status;
                       const primaryLang = generatedLangs[0] ?? progress.site.target_langs[0];
-                      const mirrorUrl = generated.length > 0 ? `/sites/${progress.site.slug}/${primaryLang}${page.path}` : null;
+                      const mirrorUrl = page.mirrorUrlsByLang[primaryLang] ?? null;
 
                       return (
                         <div className="page-row" role="row" key={page.id}>
@@ -485,12 +577,12 @@ export default function SiteDetailPage() {
                           <span className={`page-status page-status-${visualStatus}`}>{status}</span>
                           <div className="lang-cell">
                             {progress.site.target_langs.map((lang) => {
-                              const mirror = generatedByLang.get(lang);
-                              return mirror ? (
+                              const langMirrorUrl = page.mirrorUrlsByLang[lang];
+                              return langMirrorUrl ? (
                                 <a
                                   key={lang}
                                   className="lang-pill done"
-                                  href={`/sites/${progress.site.slug}/${lang}${mirror.path}`}
+                                  href={langMirrorUrl}
                                   aria-label={`${t("detail.open")} ${lang}`}
                                 >
                                   {lang}
@@ -527,6 +619,16 @@ export default function SiteDetailPage() {
                       );
                     })
                   )}
+                </div>
+                <div ref={loadMorePagesRef} className="load-more-sentinel detail-load-more" aria-busy={isLoadingMorePages ? "true" : undefined}>
+                  {isLoadingMorePages ? (
+                    <span className="loading-inline">
+                      <span className="button-spinner" aria-hidden="true" />
+                      {t("common.loading")}
+                    </span>
+                  ) : !isLoadingPages && pages.length > 0 && !nextPageCursor ? (
+                    <span>{t("common.noMore")}</span>
+                  ) : null}
                 </div>
               </div>
 

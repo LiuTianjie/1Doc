@@ -227,7 +227,7 @@ export default function SubmitPage() {
   async function loadSiteProgress(slug: string) {
     setIsLoadingProgress(true);
     try {
-      const response = await fetch(`/api/sites/${slug}`, { cache: "no-store" });
+      const response = await fetch(`/api/sites/${slug}?includePages=1`, { cache: "no-store" });
       const payload = (await response.json()) as SiteProgress | { error?: string };
       if (!response.ok) {
         const errorPayload = payload as { error?: string };

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { GitHubLink } from "./components/GitHubLink";
 import { MirrorSearch } from "./components/MirrorSearch";
 import { SiteFooter } from "./components/SiteFooter";
@@ -76,8 +76,18 @@ export default function PlazaPage() {
   const [voterId, setVoterId] = useState<string>("");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [votingSiteIds, setVotingSiteIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+  const nextCursorRef = useRef<string | null>(null);
+  const loadingMoreRef = useRef(false);
+
+  function updateNextCursor(value: string | null) {
+    nextCursorRef.current = value;
+    setNextCursor(value);
+  }
 
   function ensureVoterId(): string {
     const existing = window.localStorage.getItem("1doc:voter-id");
@@ -90,35 +100,95 @@ export default function PlazaPage() {
     return next;
   }
 
-  async function loadSites(activeVoterId = voterId, options: { silent?: boolean } = {}) {
-    if (!options.silent && !isLoading) {
+  function mergeFirstPage(current: SiteCard[], incoming: SiteCard[]): SiteCard[] {
+    const incomingIds = new Set(incoming.map((site) => site.id));
+    return [...incoming, ...current.filter((site) => !incomingIds.has(site.id))];
+  }
+
+  function appendSites(current: SiteCard[], incoming: SiteCard[]): SiteCard[] {
+    const existingIds = new Set(current.map((site) => site.id));
+    return [...current, ...incoming.filter((site) => !existingIds.has(site.id))];
+  }
+
+  async function loadSites(activeVoterId = voterId, options: { silent?: boolean; append?: boolean; cursor?: string | null } = {}) {
+    if (options.append) {
+      const cursor = options.cursor ?? nextCursorRef.current;
+      if (!cursor || loadingMoreRef.current) {
+        return;
+      }
+      loadingMoreRef.current = true;
+      setIsLoadingMore(true);
+    } else if (!options.silent && !isLoading) {
       setIsRefreshing(true);
     }
 
     try {
-      const query = activeVoterId ? `?voterId=${encodeURIComponent(activeVoterId)}` : "";
+      const params = new URLSearchParams();
+      if (activeVoterId) {
+        params.set("voterId", activeVoterId);
+      }
+      const cursor = options.append ? options.cursor ?? nextCursorRef.current : options.cursor;
+      if (cursor) {
+        params.set("cursor", cursor);
+      }
+      const query = params.toString() ? `?${params.toString()}` : "";
       const response = await fetch(`/api/sites${query}`, { cache: "no-store" });
-      const payload = (await response.json()) as { sites?: SiteCard[]; error?: string };
+      const payload = (await response.json()) as { sites?: SiteCard[]; nextCursor?: string | null; error?: string };
       if (!response.ok || !payload.sites) {
         throw new Error(payload.error || t("common.loadFailed"));
       }
-      setSites(payload.sites);
+      setSites((current) => {
+        if (options.append) {
+          return appendSites(current, payload.sites ?? []);
+        }
+        if (options.silent) {
+          return mergeFirstPage(current, payload.sites ?? []);
+        }
+        return payload.sites ?? [];
+      });
+      if (!options.silent || options.append) {
+        updateNextCursor(payload.nextCursor ?? null);
+      }
       setError(null);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : t("common.loadFailed"));
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
+      setIsLoadingMore(false);
+      if (options.append) {
+        loadingMoreRef.current = false;
+      }
     }
   }
 
   useEffect(() => {
     const id = ensureVoterId();
     setVoterId(id);
+    updateNextCursor(null);
     loadSites(id);
     const timer = window.setInterval(() => loadSites(id, { silent: true }), 8000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    const node = loadMoreRef.current;
+    if (!node || !nextCursor || isLoading || isRefreshing || isLoadingMore) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const cursor = nextCursorRef.current;
+        if (entries.some((entry) => entry.isIntersecting) && cursor && !loadingMoreRef.current) {
+          void loadSites(voterId, { append: true, cursor, silent: true });
+        }
+      },
+      { rootMargin: "320px" }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [nextCursor, voterId, isLoading, isRefreshing, isLoadingMore]);
 
   async function vote(site: SiteCard, value: -1 | 1) {
     const id = voterId || ensureVoterId();
@@ -155,25 +225,17 @@ export default function PlazaPage() {
         throw new Error(payload.error || t("common.loadFailed"));
       }
       setSites((current) =>
-        current
-          .map((candidate) =>
-            candidate.id === site.id
-              ? {
-                  ...candidate,
-                  upvote_count: payload.upvote_count ?? candidate.upvote_count,
-                  downvote_count: payload.downvote_count ?? candidate.downvote_count,
-                  vote_score: payload.vote_score ?? candidate.vote_score,
-                  user_vote: payload.user_vote ?? candidate.user_vote
-                }
-              : candidate
-          )
-          .sort(
-            (a, b) =>
-              b.vote_score - a.vote_score ||
-              b.upvote_count - a.upvote_count ||
-              b.generated_count - a.generated_count ||
-              b.updated_at.localeCompare(a.updated_at)
-          )
+        current.map((candidate) =>
+          candidate.id === site.id
+            ? {
+                ...candidate,
+                upvote_count: payload.upvote_count ?? candidate.upvote_count,
+                downvote_count: payload.downvote_count ?? candidate.downvote_count,
+                vote_score: payload.vote_score ?? candidate.vote_score,
+                user_vote: payload.user_vote ?? candidate.user_vote
+              }
+            : candidate
+        )
       );
     } catch (voteError) {
       setSites((current) => current.map((candidate) => (candidate.id === site.id ? previous : candidate)));
@@ -187,12 +249,11 @@ export default function PlazaPage() {
     }
   }
 
-  const readySites = useMemo(() => sites.filter((site) => site.mirrorUrls.length > 0), [sites]);
+  const readySites = useMemo(() => sites.filter((site) => site.status === "ready"), [sites]);
   const activeSites = useMemo(
     () => sites.filter((site) => site.status === "queued" || site.status === "discovering" || site.status === "generating"),
     [sites]
   );
-  const failedSites = useMemo(() => sites.filter((site) => site.status === "failed"), [sites]);
 
   function statusLabel(status: SiteStatus): string {
     const labels: Record<SiteStatus, string> = {
@@ -240,10 +301,6 @@ export default function PlazaPage() {
             <strong>{activeSites.length}</strong>
             <span>{t("plaza.activeStat")}</span>
           </div>
-          <div>
-            <strong>{failedSites.length}</strong>
-            <span>{t("plaza.failedStat")}</span>
-          </div>
         </div>
       </section>
 
@@ -258,9 +315,9 @@ export default function PlazaPage() {
             </div>
           </div>
           <div className="mirror-grid">
-            {activeSites.slice(0, 3).map((site) => (
+            {activeSites.map((site) => (
               <article
-                className="mirror-card mirror-card-clickable"
+                className="mirror-card mirror-card-clickable mirror-card-compact"
                 key={site.id}
                 onClick={(event) => {
                   if (!isInteractiveCardTarget(event.target)) {
@@ -271,32 +328,12 @@ export default function PlazaPage() {
                 <div className="mirror-card-top">
                   <div className="mirror-title-row">
                     <SiteFavicon site={site} />
-                    <div>
-                    <p>{hostname(site.entry_url)}</p>
-                    <h3>{siteDisplayName(site)}</h3>
+                    <div className="mirror-title-copy">
+                      <p className="site-host">{hostname(site.entry_url)}</p>
+                      <h3>{siteDisplayName(site)}</h3>
                     </div>
                   </div>
                   <div className="mirror-card-badges">
-                    <LlmTextButton
-                      site={site}
-                      compact
-                      onGenerated={(llmText) => {
-                        setSites((current) =>
-                          current.map((candidate) =>
-                            candidate.id === site.id
-                              ? {
-                                  ...candidate,
-                                  llmTexts: [
-                                    ...candidate.llmTexts.filter((item) => item.lang !== llmText.lang),
-                                    llmText
-                                  ]
-                                }
-                              : candidate
-                          )
-                        );
-                      }}
-                      onError={setError}
-                    />
                     <span className={`status-pill status-${site.status}`}>{statusLabel(site.status)}</span>
                   </div>
                 </div>
@@ -307,18 +344,6 @@ export default function PlazaPage() {
                   <span>{site.discovered_count} {t("common.pages")}</span>
                   <span>{site.generated_count} {t("common.snapshots")}</span>
                   <span>{progressFor(site)}%</span>
-                </div>
-                <div className="mirror-actions">
-                  <VoteControls
-                    site={site}
-                    onVote={vote}
-                    busy={votingSiteIds.has(site.id)}
-                    upvoteLabel={t("common.upvote")}
-                    downvoteLabel={t("common.downvote")}
-                  />
-                  <a className="primary-link mirror-visit-link" href={`/sites/${site.slug}`}>
-                    {t("common.progress")}
-                  </a>
                 </div>
               </article>
             ))}
@@ -347,73 +372,85 @@ export default function PlazaPage() {
         ) : readySites.length === 0 ? (
           <div className="empty-state">{t("plaza.empty")}</div>
         ) : (
-          <div className="mirror-grid">
-            {readySites.map((site) => (
-              <article
-                className="mirror-card mirror-card-clickable"
-                key={site.id}
-                onClick={(event) => {
-                  if (!isInteractiveCardTarget(event.target)) {
-                    window.location.href = `/sites/${site.slug}`;
-                  }
-                }}
-              >
-                <div className="mirror-card-top">
-                  <div className="mirror-title-row">
-                    <SiteFavicon site={site} />
-                    <div>
-                    <p>{hostname(site.entry_url)}</p>
-                    <h3>{siteDisplayName(site)}</h3>
+          <>
+            <div className="mirror-grid">
+              {readySites.map((site) => (
+                <article
+                  className="mirror-card mirror-card-clickable"
+                  key={site.id}
+                  onClick={(event) => {
+                    if (!isInteractiveCardTarget(event.target)) {
+                      window.location.href = `/sites/${site.slug}`;
+                    }
+                  }}
+                >
+                  <div className="mirror-card-top">
+                    <div className="mirror-title-row">
+                      <SiteFavicon site={site} />
+                      <div className="mirror-title-copy">
+                        <p className="site-host">{hostname(site.entry_url)}</p>
+                        <h3>{siteDisplayName(site)}</h3>
+                      </div>
+                    </div>
+                    <div className="mirror-card-badges">
+                      <LlmTextButton
+                        site={site}
+                        compact
+                        onGenerated={(llmText) => {
+                          setSites((current) =>
+                            current.map((candidate) =>
+                              candidate.id === site.id
+                                ? {
+                                    ...candidate,
+                                    llmTexts: [
+                                      ...candidate.llmTexts.filter((item) => item.lang !== llmText.lang),
+                                      llmText
+                                    ]
+                                  }
+                                : candidate
+                            )
+                          );
+                        }}
+                        onError={setError}
+                      />
+                      <span className={`status-pill status-${site.status}`}>{statusLabel(site.status)}</span>
                     </div>
                   </div>
-                  <div className="mirror-card-badges">
-                    <LlmTextButton
-                      site={site}
-                      compact
-                      onGenerated={(llmText) => {
-                        setSites((current) =>
-                          current.map((candidate) =>
-                            candidate.id === site.id
-                              ? {
-                                  ...candidate,
-                                  llmTexts: [
-                                    ...candidate.llmTexts.filter((item) => item.lang !== llmText.lang),
-                                    llmText
-                                  ]
-                                }
-                              : candidate
-                          )
-                        );
-                      }}
-                      onError={setError}
-                    />
-                    <span className={`status-pill status-${site.status}`}>{statusLabel(site.status)}</span>
+                  <p className="source-url">{site.entry_url}</p>
+                  <div className="mirror-meta">
+                    <span>{site.discovered_count} {t("common.pages")}</span>
+                    <span>{site.generated_count} {t("common.snapshots")}</span>
+                    <span>{site.target_langs.join(", ")}</span>
                   </div>
-                </div>
-                <p className="source-url">{site.entry_url}</p>
-                <div className="mirror-meta">
-                  <span>{site.discovered_count} {t("common.pages")}</span>
-                  <span>{site.generated_count} {t("common.snapshots")}</span>
-                  <span>{site.target_langs.join(", ")}</span>
-                </div>
-                <div className="mirror-actions">
-                  <VoteControls
-                    site={site}
-                    onVote={vote}
-                    busy={votingSiteIds.has(site.id)}
-                    upvoteLabel={t("common.upvote")}
-                    downvoteLabel={t("common.downvote")}
-                  />
-                  <LanguageVisitPill site={site} />
-                  <a className="ghost-button" href={site.entry_url} target="_blank" rel="noreferrer">
-                    {t("common.original")}
-                  </a>
-                  <span>{t("common.updated")} {formatTime(site.updated_at, locale)}</span>
-                </div>
-              </article>
-            ))}
-          </div>
+                  <div className="mirror-actions">
+                    <VoteControls
+                      site={site}
+                      onVote={vote}
+                      busy={votingSiteIds.has(site.id)}
+                      upvoteLabel={t("common.upvote")}
+                      downvoteLabel={t("common.downvote")}
+                    />
+                    <LanguageVisitPill site={site} />
+                    <a className="ghost-button" href={site.entry_url} target="_blank" rel="noreferrer">
+                      {t("common.original")}
+                    </a>
+                    <span>{t("common.updated")} {formatTime(site.updated_at, locale)}</span>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </>
         )}
+        <div ref={loadMoreRef} className="load-more-sentinel" aria-busy={isLoadingMore ? "true" : undefined}>
+          {isLoadingMore ? (
+            <span className="loading-inline">
+              <span className="button-spinner" aria-hidden="true" />
+              {t("common.loading")}
+            </span>
+          ) : !isLoading && sites.length > 0 && !nextCursor ? (
+            <span>{t("common.noMore")}</span>
+          ) : null}
+        </div>
       </section>
       <SiteFooter />
     </main>
@@ -473,27 +510,22 @@ function LanguageVisitPill({ site }: { site: SiteCard }) {
   }
 
   return (
-    <label className="locale-switcher document-language-switcher" aria-label={t("common.openTranslatedLanguage")}>
+    <div className="language-select-wrap" aria-label={t("common.openTranslatedLanguage")}>
       <span>{primaryMirror.lang.toUpperCase()}</span>
       <select
-        defaultValue=""
+        aria-label={t("common.openTranslatedLanguage")}
+        defaultValue={primaryMirror.url}
         onChange={(event) => {
-          const next = site.mirrorUrls.find((mirror) => mirror.lang === event.target.value);
-          if (next) {
-            window.location.href = next.url;
-          }
+          window.location.href = event.currentTarget.value;
         }}
       >
-        <option value="" disabled>
-          {primaryMirror.lang}
-        </option>
         {site.mirrorUrls.map((mirror) => (
-          <option key={mirror.lang} value={mirror.lang}>
+          <option key={mirror.lang} value={mirror.url}>
             {mirror.lang.toUpperCase()}
           </option>
         ))}
       </select>
-    </label>
+    </div>
   );
 }
 
