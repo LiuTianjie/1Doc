@@ -295,17 +295,28 @@ export async function generateMirrorSite(
     }
     await addJobEvent(site.id, hasReady ? "info" : "error", hasReady ? "Mirror generation complete" : "No pages generated");
   } catch (error) {
-    await updateDocSite(site.id, {
-      status: "failed",
-      last_error: error instanceof Error ? error.message : "Unknown site generation error."
-    });
+    const errorMessage = error instanceof Error ? error.message : "Unknown site generation error.";
+    let hasGeneratedPages = false;
+    try {
+      const sourcePages = await listSourcePages(site.id);
+      hasGeneratedPages = sourcePages.some((page) => page.status === "ready" || page.status === "skipped");
+      await recomputeSiteCounters(site.id, hasGeneratedPages ? "ready" : "failed");
+      if (!hasGeneratedPages) {
+        await updateDocSite(site.id, { last_error: errorMessage });
+      }
+    } catch {
+      await updateDocSite(site.id, {
+        status: "failed",
+        last_error: errorMessage
+      });
+    }
     await addJobEvent(site.id, "error", "Site generation failed", {
-      error: error instanceof Error ? error.message : "Unknown error"
+      error: errorMessage
     });
     if (jobId) {
       await updateGenerationJob(jobId, {
         status: "failed",
-        last_error: error instanceof Error ? error.message : "Unknown error",
+        last_error: errorMessage,
         finished_at: new Date().toISOString()
       });
       await releaseGenerationJob(site.id, jobId);

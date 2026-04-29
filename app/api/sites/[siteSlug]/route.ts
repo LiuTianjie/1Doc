@@ -1,3 +1,5 @@
+import { inngest } from "@/inngest/client";
+import { recoverStaleMirrorGeneration } from "@/lib/mirror/jobs";
 import { getSiteProgress } from "@/lib/mirror/store";
 
 export const runtime = "nodejs";
@@ -17,7 +19,16 @@ export async function GET(
   context: { params: Promise<{ siteSlug: string }> }
 ) {
   const { siteSlug } = await context.params;
-  const progress = await getSiteProgress(siteSlug);
+  const initialProgress = await getSiteProgress(siteSlug);
+  if (!initialProgress) {
+    return Response.json({ error: "Site not found." }, { status: 404 });
+  }
+
+  const recoveryMode = await recoverStaleMirrorGeneration(initialProgress.site.id, inngest, {
+    trigger: "refresh",
+    mode: "incremental"
+  });
+  const progress = recoveryMode === "skipped" ? initialProgress : await getSiteProgress(siteSlug);
 
   if (!progress) {
     return Response.json({ error: "Site not found." }, { status: 404 });

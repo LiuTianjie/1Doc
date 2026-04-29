@@ -1,5 +1,13 @@
 import { generateMirrorSite } from "./generator";
-import { createGenerationJob, getActiveGenerationJob, getDocSiteById, updateDocSite } from "./store";
+import {
+  addJobEvent,
+  createGenerationJob,
+  getActiveGenerationJob,
+  getDocSiteById,
+  releaseGenerationJob,
+  updateDocSite,
+  updateGenerationJob
+} from "./store";
 import type { GenerationJob, GenerationMode } from "./types";
 
 type InngestLike = {
@@ -21,6 +29,10 @@ function isComplete(site: Awaited<ReturnType<typeof getDocSiteById>>): boolean {
   }
 
   return site.generated_count >= site.discovered_count * site.target_langs.length;
+}
+
+function isActiveSiteStatus(status: string): boolean {
+  return status === "queued" || status === "discovering" || status === "generating";
 }
 
 export async function enqueueMirrorGeneration(
@@ -64,4 +76,44 @@ export async function enqueueMirrorGeneration(
       console.error("Local mirror generation failed", error);
     });
   return "inline";
+}
+
+export async function recoverStaleMirrorGeneration(
+  siteId: string,
+  inngest?: InngestLike,
+  options: { trigger?: GenerationJob["trigger"]; mode?: GenerationMode } = {}
+): Promise<"queued" | "inline" | "skipped"> {
+  const site = await getDocSiteById(siteId);
+  if (!site || isComplete(site)) {
+    return "skipped";
+  }
+
+  const activeJob = await getActiveGenerationJob(siteId);
+  const staleJob = activeJob && isStale(activeJob.updated_at) ? activeJob : null;
+  const staleSite = isActiveSiteStatus(site.status) && isStale(site.updated_at);
+
+  if (!staleJob && !staleSite) {
+    return "skipped";
+  }
+
+  if (staleJob) {
+    await updateGenerationJob(staleJob.id, {
+      status: "failed",
+      last_error: "Generation was interrupted and automatically recovered.",
+      finished_at: new Date().toISOString()
+    });
+    await releaseGenerationJob(siteId, staleJob.id);
+  }
+
+  await addJobEvent(siteId, "info", "Recovering interrupted generation", {
+    staleJobId: staleJob?.id ?? null,
+    previousStatus: site.status
+  });
+
+  await updateDocSite(siteId, { status: "queued", last_error: null });
+  return enqueueMirrorGeneration(siteId, inngest, {
+    force: true,
+    trigger: options.trigger ?? "system",
+    mode: options.mode ?? "incremental"
+  });
 }

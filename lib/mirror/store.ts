@@ -301,42 +301,49 @@ export async function createDocSite(input: CreateSiteInput): Promise<DocSite> {
 }
 
 export async function getDocSiteBySlug(slug: string): Promise<DocSite | null> {
+  if (usesSupabase()) {
+    const rows = await supabaseRequest<DocSite[]>("doc_sites", {
+      method: "GET",
+      query: `?slug=eq.${encodeURIComponent(slug)}&limit=1`
+    });
+    return rows?.[0] ?? null;
+  }
+
   const inMemory = memory.sites.get(siteMemoryKey(slug));
   if (inMemory) {
     return inMemory;
   }
 
-  const rows = await supabaseRequest<DocSite[]>("doc_sites", {
-    method: "GET",
-    query: `?slug=eq.${encodeURIComponent(slug)}&limit=1`
-  });
-  return rows?.[0] ?? null;
+  return null;
 }
 
 export async function getDocSiteById(siteId: string): Promise<DocSite | null> {
+  if (usesSupabase()) {
+    const rows = await supabaseRequest<DocSite[]>("doc_sites", {
+      method: "GET",
+      query: `?id=eq.${encodeURIComponent(siteId)}&limit=1`
+    });
+    return rows?.[0] ?? null;
+  }
+
   const inMemory = [...memory.sites.values()].find((site) => site.id === siteId);
   if (inMemory) {
     return inMemory;
   }
 
-  const rows = await supabaseRequest<DocSite[]>("doc_sites", {
-    method: "GET",
-    query: `?id=eq.${encodeURIComponent(siteId)}&limit=1`
-  });
-  return rows?.[0] ?? null;
+  return null;
 }
 
 export async function listDocSites(): Promise<DocSite[]> {
-  const inMemory = [...memory.sites.values()];
-  if (inMemory.length > 0 || !usesSupabase()) {
-    return inMemory.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  if (usesSupabase()) {
+    const rows = await supabaseRequest<DocSite[]>("doc_sites", {
+      method: "GET",
+      query: "?order=updated_at.desc&limit=100"
+    });
+    return rows ?? [];
   }
 
-  const rows = await supabaseRequest<DocSite[]>("doc_sites", {
-    method: "GET",
-    query: "?order=updated_at.desc&limit=100"
-  });
-  return rows ?? [];
+  return [...memory.sites.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
 }
 
 export async function resetSiteContent(siteId: string): Promise<void> {
@@ -419,19 +426,29 @@ export async function addJobEvent(
 }
 
 export async function listGenerationJobs(siteId: string): Promise<GenerationJob[]> {
-  const jobs = [...memory.jobs.values()].filter((job) => job.site_id === siteId);
-  if (jobs.length > 0 || !usesSupabase()) {
-    return jobs.sort((a, b) => a.created_at.localeCompare(b.created_at)).slice(-25);
+  if (usesSupabase()) {
+    const rows = await supabaseRequest<GenerationJob[]>("generation_jobs", {
+      method: "GET",
+      query: `?site_id=eq.${encodeURIComponent(siteId)}&order=created_at.desc&limit=25`
+    });
+    return (rows ?? []).map(normalizeGenerationJob).reverse();
   }
 
-  const rows = await supabaseRequest<GenerationJob[]>("generation_jobs", {
-    method: "GET",
-    query: `?site_id=eq.${encodeURIComponent(siteId)}&order=created_at.desc&limit=25`
-  });
-  return (rows ?? []).map(normalizeGenerationJob).reverse();
+  return [...memory.jobs.values()]
+    .filter((job) => job.site_id === siteId)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at))
+    .slice(-25);
 }
 
 export async function getActiveGenerationJob(siteId: string): Promise<GenerationJob | null> {
+  if (usesSupabase()) {
+    const rows = await supabaseRequest<GenerationJob[]>("generation_jobs", {
+      method: "GET",
+      query: `?site_id=eq.${encodeURIComponent(siteId)}&status=in.(queued,running)&order=created_at.desc&limit=1`
+    });
+    return rows?.[0] ? normalizeGenerationJob(rows[0]) : null;
+  }
+
   const memoryJob = [...memory.jobs.values()]
     .filter((job) => job.site_id === siteId && isGenerationJobActive(job))
     .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
@@ -439,11 +456,7 @@ export async function getActiveGenerationJob(siteId: string): Promise<Generation
     return memoryJob;
   }
 
-  const rows = await supabaseRequest<GenerationJob[]>("generation_jobs", {
-    method: "GET",
-    query: `?site_id=eq.${encodeURIComponent(siteId)}&status=in.(queued,running)&order=created_at.desc&limit=1`
-  });
-  return rows?.[0] ? normalizeGenerationJob(rows[0]) : null;
+  return null;
 }
 
 async function getGenerationLock(siteId: string): Promise<GenerationLock | null> {
@@ -632,9 +645,18 @@ export async function updateGenerationJob(jobId: string, patch: Partial<Generati
 }
 
 export async function upsertSourcePage(input: Omit<SourcePage, "id" | "discovered_at" | "updated_at">): Promise<SourcePage> {
-  const existing = [...memory.pages.values()].find(
+  let existing = [...memory.pages.values()].find(
     (page) => page.site_id === input.site_id && page.path === input.path
   );
+
+  if (!existing && usesSupabase()) {
+    const rows = await supabaseRequest<SourcePage[]>("source_pages", {
+      method: "GET",
+      query: `?site_id=eq.${encodeURIComponent(input.site_id)}&path=eq.${encodeURIComponent(input.path)}&limit=1`
+    });
+    existing = rows?.[0];
+  }
+
   const now = nowIso();
   const page: SourcePage = {
     id: existing?.id ?? crypto.randomUUID(),
@@ -683,31 +705,32 @@ export async function upsertSourcePage(input: Omit<SourcePage, "id" | "discovere
 }
 
 export async function listSourcePages(siteId: string): Promise<SourcePage[]> {
-  const pages = [...memory.pages.values()].filter((page) => page.site_id === siteId);
-  if (pages.length > 0 || !usesSupabase()) {
-    return pages.sort((a, b) => a.path.localeCompare(b.path));
+  if (usesSupabase()) {
+    const rows = await supabaseRequest<SourcePage[]>("source_pages", {
+      method: "GET",
+      query: `?site_id=eq.${encodeURIComponent(siteId)}&order=path.asc`
+    });
+    return rows ?? [];
   }
 
-  const rows = await supabaseRequest<SourcePage[]>("source_pages", {
-    method: "GET",
-    query: `?site_id=eq.${encodeURIComponent(siteId)}&order=path.asc`
-  });
-  return rows ?? [];
+  return [...memory.pages.values()].filter((page) => page.site_id === siteId).sort((a, b) => a.path.localeCompare(b.path));
 }
 
 export async function getSourcePage(siteId: string, path: string): Promise<SourcePage | null> {
   for (const candidate of mirrorPathCandidates(path)) {
-    const inMemory = memory.pages.get(sourcePageMemoryKey(siteId, candidate));
-    if (inMemory) {
-      return inMemory;
-    }
-
-    const rows = await supabaseRequest<SourcePage[]>("source_pages", {
-      method: "GET",
-      query: `?site_id=eq.${encodeURIComponent(siteId)}&path=eq.${encodeURIComponent(candidate)}&limit=1`
-    });
-    if (rows?.[0]) {
-      return rows[0];
+    if (usesSupabase()) {
+      const rows = await supabaseRequest<SourcePage[]>("source_pages", {
+        method: "GET",
+        query: `?site_id=eq.${encodeURIComponent(siteId)}&path=eq.${encodeURIComponent(candidate)}&limit=1`
+      });
+      if (rows?.[0]) {
+        return rows[0];
+      }
+    } else {
+      const inMemory = memory.pages.get(sourcePageMemoryKey(siteId, candidate));
+      if (inMemory) {
+        return inMemory;
+      }
     }
   }
 
@@ -715,16 +738,15 @@ export async function getSourcePage(siteId: string, path: string): Promise<Sourc
 }
 
 export async function getSourcePageById(siteId: string, pageId: string): Promise<SourcePage | null> {
-  const inMemory = [...memory.pages.values()].find((page) => page.site_id === siteId && page.id === pageId);
-  if (inMemory) {
-    return inMemory;
+  if (usesSupabase()) {
+    const rows = await supabaseRequest<SourcePage[]>("source_pages", {
+      method: "GET",
+      query: `?site_id=eq.${encodeURIComponent(siteId)}&id=eq.${encodeURIComponent(pageId)}&limit=1`
+    });
+    return rows?.[0] ?? null;
   }
 
-  const rows = await supabaseRequest<SourcePage[]>("source_pages", {
-    method: "GET",
-    query: `?site_id=eq.${encodeURIComponent(siteId)}&id=eq.${encodeURIComponent(pageId)}&limit=1`
-  });
-  return rows?.[0] ?? null;
+  return [...memory.pages.values()].find((page) => page.site_id === siteId && page.id === pageId) ?? null;
 }
 
 export async function upsertMirroredPage(
@@ -760,17 +782,19 @@ export async function upsertMirroredPage(
 
 export async function getMirroredPage(siteId: string, lang: string, path: string): Promise<MirroredPage | null> {
   for (const candidate of mirrorPathCandidates(path)) {
-    const inMemory = memory.mirrored.get(mirroredPageMemoryKey(siteId, lang, candidate));
-    if (inMemory) {
-      return inMemory;
-    }
-
-    const rows = await supabaseRequest<MirroredPage[]>("mirrored_pages", {
-      method: "GET",
-      query: `?site_id=eq.${encodeURIComponent(siteId)}&lang=eq.${encodeURIComponent(lang)}&path=eq.${encodeURIComponent(candidate)}&limit=1`
-    });
-    if (rows?.[0]) {
-      return rows[0];
+    if (usesSupabase()) {
+      const rows = await supabaseRequest<MirroredPage[]>("mirrored_pages", {
+        method: "GET",
+        query: `?site_id=eq.${encodeURIComponent(siteId)}&lang=eq.${encodeURIComponent(lang)}&path=eq.${encodeURIComponent(candidate)}&limit=1`
+      });
+      if (rows?.[0]) {
+        return rows[0];
+      }
+    } else {
+      const inMemory = memory.mirrored.get(mirroredPageMemoryKey(siteId, lang, candidate));
+      if (inMemory) {
+        return inMemory;
+      }
     }
   }
 
@@ -859,18 +883,18 @@ export async function findMirrorTargetByPath(path: string): Promise<{
 }
 
 export async function listMirroredPages(siteId: string): Promise<MirroredPageSummary[]> {
-  const pages = [...memory.mirrored.values()]
-    .filter((page) => page.site_id === siteId)
-    .map(({ html: _html, ...page }) => page);
-  if (pages.length > 0 || !usesSupabase()) {
-    return pages.sort((a, b) => `${a.lang}:${a.path}`.localeCompare(`${b.lang}:${b.path}`));
+  if (usesSupabase()) {
+    const rows = await supabaseRequest<MirroredPageSummary[]>("mirrored_pages", {
+      method: "GET",
+      query: `?select=id,site_id,source_page_id,lang,path,source_html_hash,generated_at,updated_at&site_id=eq.${encodeURIComponent(siteId)}&order=lang.asc,path.asc`
+    });
+    return rows ?? [];
   }
 
-  const rows = await supabaseRequest<MirroredPageSummary[]>("mirrored_pages", {
-    method: "GET",
-    query: `?select=id,site_id,source_page_id,lang,path,source_html_hash,generated_at,updated_at&site_id=eq.${encodeURIComponent(siteId)}&order=lang.asc,path.asc`
-  });
-  return rows ?? [];
+  return [...memory.mirrored.values()]
+    .filter((page) => page.site_id === siteId)
+    .map(({ html: _html, ...page }) => page)
+    .sort((a, b) => `${a.lang}:${a.path}`.localeCompare(`${b.lang}:${b.path}`));
 }
 
 export async function listMirroredPagesForSites(siteIds: string[]): Promise<Map<string, MirroredPageSummary[]>> {
@@ -959,19 +983,18 @@ export async function getSiteLlmText(siteId: string, lang: string): Promise<Site
 }
 
 export async function listSiteLlmTexts(siteId: string): Promise<SiteLlmText[]> {
-  const rows = [...memory.llmTexts.values()].filter((item) => item.site_id === siteId);
-  if (rows.length > 0 || !usesSupabase()) {
-    return rows.sort((a, b) => a.lang.localeCompare(b.lang));
+  if (usesSupabase()) {
+    const supabaseRows = await supabaseRequest<Array<Omit<SiteLlmText, "content">>>("site_llm_texts", {
+      method: "GET",
+      query: `?site_id=eq.${encodeURIComponent(siteId)}&select=site_id,lang,page_count,generated_at,updated_at&order=lang.asc`
+    }).catch((error) => {
+      console.warn("Could not load site LLM text metadata.", error);
+      return null;
+    });
+    return (supabaseRows ?? []).map((row) => ({ ...row, content: "" }));
   }
 
-  const supabaseRows = await supabaseRequest<Array<Omit<SiteLlmText, "content">>>("site_llm_texts", {
-    method: "GET",
-    query: `?site_id=eq.${encodeURIComponent(siteId)}&select=site_id,lang,page_count,generated_at,updated_at&order=lang.asc`
-  }).catch((error) => {
-    console.warn("Could not load site LLM text metadata.", error);
-    return null;
-  });
-  return (supabaseRows ?? []).map((row) => ({ ...row, content: "" }));
+  return [...memory.llmTexts.values()].filter((item) => item.site_id === siteId).sort((a, b) => a.lang.localeCompare(b.lang));
 }
 
 export async function listSiteLlmTextsForSites(siteIds: string[]): Promise<Map<string, SiteLlmText[]>> {
@@ -1015,16 +1038,18 @@ export async function listSiteLlmTextsForSites(siteIds: string[]): Promise<Map<s
 }
 
 export async function listJobEvents(siteId: string): Promise<JobEvent[]> {
-  const events = [...memory.events.values()].filter((event) => event.site_id === siteId);
-  if (events.length > 0 || !usesSupabase()) {
-    return events.sort((a, b) => a.created_at.localeCompare(b.created_at)).slice(-50);
+  if (usesSupabase()) {
+    const rows = await supabaseRequest<JobEvent[]>("job_events", {
+      method: "GET",
+      query: `?site_id=eq.${encodeURIComponent(siteId)}&order=created_at.desc&limit=50`
+    });
+    return (rows ?? []).reverse();
   }
 
-  const rows = await supabaseRequest<JobEvent[]>("job_events", {
-    method: "GET",
-    query: `?site_id=eq.${encodeURIComponent(siteId)}&order=created_at.desc&limit=50`
-  });
-  return (rows ?? []).reverse();
+  return [...memory.events.values()]
+    .filter((event) => event.site_id === siteId)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at))
+    .slice(-50);
 }
 
 export async function listLatestJobEventsForSites(siteIds: string[]): Promise<Map<string, JobEvent | null>> {

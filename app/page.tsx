@@ -183,7 +183,7 @@ export default function PlazaPage() {
     }
   }
 
-  const readySites = useMemo(() => sites.filter((site) => site.status === "ready" && site.mirrorUrls.length > 0), [sites]);
+  const readySites = useMemo(() => sites.filter((site) => site.mirrorUrls.length > 0), [sites]);
   const activeSites = useMemo(
     () => sites.filter((site) => site.status === "queued" || site.status === "discovering" || site.status === "generating"),
     [sites]
